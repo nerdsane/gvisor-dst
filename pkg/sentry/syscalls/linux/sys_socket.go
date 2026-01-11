@@ -257,6 +257,18 @@ func Connect(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr
 	addr := args[1].Pointer()
 	addrlen := args[2].Uint()
 
+	// DST: Check for network connect fault injection.
+	if result := dstfault.CheckNetworkConnectFault(t.Name()); result.ShouldFault {
+		switch result.FaultType {
+		case dstfault.FaultNetworkConnectRefused:
+			return 0, nil, linuxerr.ECONNREFUSED
+		case dstfault.FaultNetworkConnectTimeout:
+			return 0, nil, linuxerr.ETIMEDOUT
+		default:
+			return 0, nil, linuxerr.ECONNREFUSED
+		}
+	}
+
 	// Get socket from the file descriptor.
 	file := t.GetFile(fd)
 	if file == nil {
@@ -283,6 +295,11 @@ func Connect(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr
 // accept is the implementation of the accept syscall. It is called by accept
 // and accept4 syscall handlers.
 func accept(t *kernel.Task, fd int32, addr hostarch.Addr, addrLen hostarch.Addr, flags int) (uintptr, error) {
+	// DST: Check for network accept fault injection.
+	if result := dstfault.CheckNetworkAcceptFault(t.Name()); result.ShouldFault {
+		return 0, linuxerr.ECONNABORTED
+	}
+
 	// Check that no unsupported flags are passed in.
 	if flags & ^(linux.SOCK_NONBLOCK|linux.SOCK_CLOEXEC) != 0 {
 		return 0, linuxerr.EINVAL
@@ -347,6 +364,11 @@ func Bind(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *
 	addr := args[1].Pointer()
 	addrlen := args[2].Uint()
 
+	// DST: Check for network bind fault injection.
+	if result := dstfault.CheckNetworkBindFault(t.Name()); result.ShouldFault {
+		return 0, nil, linuxerr.EADDRINUSE
+	}
+
 	// Get socket from the file descriptor.
 	file := t.GetFile(fd)
 	if file == nil {
@@ -373,6 +395,11 @@ func Bind(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *
 func Listen(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 	backlog := args[1].Uint()
+
+	// DST: Check for network listen fault injection.
+	if result := dstfault.CheckNetworkListenFault(t.Name()); result.ShouldFault {
+		return 0, nil, linuxerr.EADDRINUSE
+	}
 
 	// Get socket from the file descriptor.
 	file := t.GetFile(fd)

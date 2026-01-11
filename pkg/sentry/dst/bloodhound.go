@@ -29,10 +29,15 @@ type FaultType string
 
 const (
 	// Network faults
-	FaultNetworkPartition FaultType = "network_partition"
-	FaultNetworkDrop      FaultType = "network_drop"
-	FaultNetworkDelay     FaultType = "network_delay"
-	FaultNetworkCorrupt   FaultType = "network_corrupt"
+	FaultNetworkPartition      FaultType = "network_partition"
+	FaultNetworkDrop           FaultType = "network_drop"
+	FaultNetworkDelay          FaultType = "network_delay"
+	FaultNetworkCorrupt        FaultType = "network_corrupt"
+	FaultNetworkConnectRefused FaultType = "network_connect_refused"
+	FaultNetworkConnectTimeout FaultType = "network_connect_timeout"
+	FaultNetworkBindFailed     FaultType = "network_bind_failed"
+	FaultNetworkListenFailed   FaultType = "network_listen_failed"
+	FaultNetworkAcceptFailed   FaultType = "network_accept_failed"
 
 	// Disk faults
 	FaultDiskWriteFailure    FaultType = "disk_write_failure"
@@ -1314,6 +1319,80 @@ func CheckSyscallFault(target string) SyscallFaultResult {
 	}
 	if fi.ShouldInjectFault(FaultSyscallEAGAIN, target) {
 		return SyscallFaultResult{ShouldFault: true, FaultType: FaultSyscallEAGAIN}
+	}
+	return SyscallFaultResult{}
+}
+
+// CheckNetworkConnectFault checks if a connect() syscall should fail.
+// Returns true if the connection should be refused or timeout.
+func CheckNetworkConnectFault(target string) SyscallFaultResult {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	if fi.ShouldInjectFault(FaultNetworkConnectRefused, target) {
+		log.Warningf("DST: Injecting connect refused fault target=%s", target)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkConnectRefused}
+	}
+	if fi.ShouldInjectFault(FaultNetworkConnectTimeout, target) {
+		log.Warningf("DST: Injecting connect timeout fault target=%s", target)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkConnectTimeout}
+	}
+	// Also check general network drop for connect
+	if fi.ShouldInjectFault(FaultNetworkDrop, target) {
+		log.Warningf("DST: Injecting network drop on connect target=%s", target)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkDrop}
+	}
+	return SyscallFaultResult{}
+}
+
+// CheckNetworkBindFault checks if a bind() syscall should fail.
+// Returns true if the bind should fail (e.g., address already in use).
+func CheckNetworkBindFault(target string) SyscallFaultResult {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	if fi.ShouldInjectFault(FaultNetworkBindFailed, target) {
+		log.Warningf("DST: Injecting bind fault target=%s", target)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkBindFailed}
+	}
+	return SyscallFaultResult{}
+}
+
+// CheckNetworkListenFault checks if a listen() syscall should fail.
+// Returns true if listen should fail.
+func CheckNetworkListenFault(target string) SyscallFaultResult {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	if fi.ShouldInjectFault(FaultNetworkListenFailed, target) {
+		log.Warningf("DST: Injecting listen fault target=%s", target)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkListenFailed}
+	}
+	return SyscallFaultResult{}
+}
+
+// CheckNetworkAcceptFault checks if an accept() syscall should fail.
+// Returns true if accept should fail.
+func CheckNetworkAcceptFault(target string) SyscallFaultResult {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	if fi.ShouldInjectFault(FaultNetworkAcceptFailed, target) {
+		log.Warningf("DST: Injecting accept fault target=%s", target)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkAcceptFailed}
+	}
+	// Also check general network drop
+	if fi.ShouldInjectFault(FaultNetworkDrop, target) {
+		log.Warningf("DST: Injecting network drop on accept target=%s", target)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkDrop}
 	}
 	return SyscallFaultResult{}
 }
