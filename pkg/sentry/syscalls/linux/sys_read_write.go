@@ -158,6 +158,13 @@ func Pread64(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr
 	}
 	defer file.DecRef(t)
 
+	// DST: Check for read fault injection (skip stdin/stdout/stderr and sockets).
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckReadFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
+
 	// Check that the offset is legitimate and does not overflow.
 	if offset < 0 || offset+int64(size) < 0 {
 		return 0, nil, linuxerr.EINVAL
@@ -192,6 +199,13 @@ func Preadv(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr,
 		return 0, nil, linuxerr.EBADF
 	}
 	defer file.DecRef(t)
+
+	// DST: Check for read fault injection (skip stdin/stdout/stderr and sockets).
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckReadFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
 
 	// Check that the offset is legitimate.
 	if offset < 0 {
@@ -228,6 +242,13 @@ func Preadv2(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr
 		return 0, nil, linuxerr.EBADF
 	}
 	defer file.DecRef(t)
+
+	// DST: Check for read fault injection (skip stdin/stdout/stderr and sockets).
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckReadFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
 
 	// Check that the offset is legitimate.
 	if offset < -1 {
@@ -308,7 +329,8 @@ func Write(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, 
 
 	// DST: Check for write fault injection (skip stdin/stdout/stderr and sockets).
 	// Disk faults should only apply to file I/O, not socket I/O.
-	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+	_, isSocket := file.Impl().(socket.Socket)
+	if !isSocket {
 		if result := dstfault.CheckWriteFault(fd, t.Name()); result.ShouldFault {
 			return 0, nil, linuxerr.EIO
 		}
@@ -417,6 +439,13 @@ func Pwrite64(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintpt
 	}
 	defer file.DecRef(t)
 
+	// DST: Check for write fault injection (skip stdin/stdout/stderr and sockets).
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckWriteFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
+
 	// Check that the offset is legitimate and does not overflow.
 	if offset < 0 || offset+int64(size) < 0 {
 		return 0, nil, linuxerr.EINVAL
@@ -451,6 +480,13 @@ func Pwritev(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr
 		return 0, nil, linuxerr.EBADF
 	}
 	defer file.DecRef(t)
+
+	// DST: Check for write fault injection (skip stdin/stdout/stderr and sockets).
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckWriteFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
 
 	// Check that the offset is legitimate.
 	if offset < 0 {
@@ -487,6 +523,13 @@ func Pwritev2(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintpt
 		return 0, nil, linuxerr.EBADF
 	}
 	defer file.DecRef(t)
+
+	// DST: Check for write fault injection (skip stdin/stdout/stderr and sockets).
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckWriteFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
 
 	// Check that the offset is legitimate.
 	if offset < -1 {
