@@ -1,0 +1,378 @@
+From: Bloodhound Project
+Subject: [PATCH] Add Bloodhound Integration for DST mode
+
+This patch adds support for Bloodhound integration in DST mode.
+When enabled, the simulation coordinator orchestrates fault injection,
+property checking, and snapshot management for deterministic testing.
+
+---
+ runsc/boot/loader.go           | 50 +++++++++++++++++++++++++++++++++++
+ pkg/sentry/kernel/kernel.go    | 30 +++++++++++++++++++++
+ 2 files changed, 80 insertions(+)
+
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index abc1234..def5678 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -45,6 +45,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/time"
+ 	"gvisor.dev/gvisor/pkg/rand"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel"
++	"gvisor.dev/gvisor/pkg/sentry/dst"
+ 	fsdst "gvisor.dev/gvisor/pkg/sentry/fsimpl/dst"
+ 	netdst "gvisor.dev/gvisor/pkg/tcpip/link/dst"
+ 	...
+ )
+
+ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+@@ -630,6 +631,55 @@ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+ 	// Initialize DST snapshot tree if DST mode is requested.
+ 	...
+
++	// Initialize Bloodhound simulation coordinator if DST mode is requested.
++	if dstConfig.Enabled {
++		coordConfig := dst.SimulationConfig{
++			Seed:                  dstConfig.Seed,
++			MaxSteps:              dstConfig.MaxSteps,
++			MaxTimeNS:             dstConfig.MaxTimeNS,
++			FaultProbabilities:    convertFaultProbabilities(dstConfig),
++			CheckPropertiesEveryN: dstConfig.PropertyCheckInterval,
++			SnapshotEveryN:        dstConfig.SnapshotInterval,
++			StopOnPropertyFailure: dstConfig.StopOnFailure,
++			MaxSnapshots:          dstConfig.MaxSnapshots,
++		}
++		dst.InitGlobalCoordinator(coordConfig)
++
++		coord := dst.GetGlobalCoordinator()
++
++		// Add default properties
++		pc := coord.GetPropertyChecker()
++		for _, prop := range dstConfig.Properties {
++			pc.AddProperty(convertProperty(prop))
++		}
++
++		// Schedule configured faults
++		fi := coord.GetFaultInjector()
++		for _, sf := range dstConfig.ScheduledFaults {
++			fi.Schedule(sf.TriggerTimeNS, convertFault(sf))
++		}
++
++		// Add event listener for logging
++		coord.AddListener(&bloodhoundEventLogger{})
++
++		log.Infof("Bloodhound simulation coordinator initialized with seed %d",
++			dstConfig.Seed)
++	}
++
+ 	// Create timekeeper with appropriate clock source.
+ 	tk := kernel.NewTimekeeper()
+--
+End of patch
+
+INTEGRATION NOTES:
+
+1. Initialize coordinator during container creation:
+
+   coordConfig := dst.SimulationConfig{
+       Seed:                  seed,
+       MaxSteps:              1000000,
+       MaxTimeNS:             60 * 1e9, // 60 seconds
+       FaultProbabilities:    dst.FaultProbabilitiesModerate(),
+       CheckPropertiesEveryN: 100,
+       SnapshotEveryN:        1000,
+       StopOnPropertyFailure: true,
+       MaxSnapshots:          10000,
+   }
+   dst.InitGlobalCoordinator(coordConfig)
+
+2. Add properties to check:
+
+   pc := dst.GetGlobalCoordinator().GetPropertyChecker()
+
+   // Safety property: database always consistent
+   pc.AddProperty(dst.Property{
+       Name:        "db_consistent",
+       Description: "Database is always consistent",
+       Kind:        dst.PropertySafety,
+       Check: &dst.CustomCheck{
+           CheckFn: func(state *dst.SystemState) dst.CheckResult {
+               // Check database consistency
+               if checkDbConsistency() {
+                   return dst.CheckResult{Status: dst.CheckPass}
+               }
+               return dst.CheckResult{
+                   Status: dst.CheckFail,
+                   Reason: "Database inconsistent",
+               }
+           },
+       },
+   })
+
+   // Liveness property: requests eventually complete
+   pc.AddProperty(dst.Property{
+       Name:        "requests_complete",
+       Description: "Requests eventually complete",
+       Kind:        dst.PropertyLiveness,
+       Check: &dst.EqualsCheck{
+           Key:      "pending_requests",
+           Expected: "0",
+       },
+   })
+
+3. Schedule faults:
+
+   fi := dst.GetGlobalCoordinator().GetFaultInjector()
+
+   // Schedule a network partition at 10 seconds
+   fi.Schedule(10*1e9, dst.Fault{
+       Type:     dst.FaultNetworkPartition,
+       Target:   "db-primary",
+       Duration: 5 * 1e9, // 5 second partition
+   })
+
+   // Schedule process crash at 30 seconds
+   fi.Schedule(30*1e9, dst.Fault{
+       Type:   dst.FaultProcessCrash,
+       Target: "worker-1",
+   })
+
+4. Set fault probabilities:
+
+   fi := dst.GetGlobalCoordinator().GetFaultInjector()
+
+   // Use predefined profiles
+   fi.SetProbabilities(dst.FaultProbabilitiesModerate())
+
+   // Or customize
+   fi.SetProbabilities(dst.FaultProbabilities{
+       NetworkDrop:      0.02,
+       NetworkDelay:     0.05,
+       DiskWriteFailure: 0.001,
+       ProcessCrash:     0.0001,
+   })
+
+5. Hook into syscall handling for fault injection:
+
+   // In syscall handler
+   func handleSyscall(t *Task, sysno uintptr, args ...) (uintptr, error) {
+       // Check for syscall fault injection
+       if dst.GlobalFaultCheck(dst.FaultSyscallEIO, t.Name()) {
+           return 0, unix.EIO
+       }
+       if dst.GlobalFaultCheck(dst.FaultSyscallEAGAIN, t.Name()) {
+           return 0, unix.EAGAIN
+       }
+
+       // Normal syscall handling
+       ...
+   }
+
+6. Hook into network for packet faults:
+
+   // In network send path
+   func sendPacket(pkt *PacketBuffer, dst tcpip.Address) error {
+       if dst.GlobalFaultCheck(dst.FaultNetworkDrop, dst.String()) {
+           // Drop packet silently
+           return nil
+       }
+       if dst.GlobalFaultCheck(dst.FaultNetworkDelay, dst.String()) {
+           // Add delay before sending
+           time.Sleep(randomDelay())
+       }
+
+       // Normal send
+       ...
+   }
+
+7. Hook into disk operations:
+
+   // In file write path
+   func writeFile(f *File, data []byte) (int, error) {
+       if dst.GlobalFaultCheck(dst.FaultDiskWriteFailure, f.Path()) {
+           return 0, unix.EIO
+       }
+       if dst.GlobalFaultCheck(dst.FaultDiskWriteCorruption, f.Path()) {
+           // Corrupt some bytes
+           corruptData(data)
+       }
+
+       // Normal write
+       ...
+   }
+
+8. Advance simulation on each syscall:
+
+   // After syscall completes
+   func afterSyscall(t *Task) {
+       coord := dst.GetGlobalCoordinator()
+       if coord == nil || !coord.IsRunning() {
+           return
+       }
+
+       // Advance simulation by syscall cost
+       faults, results, running := coord.Step(syscallCostNS)
+
+       // Apply injected faults
+       for _, fault := range faults {
+           applyFault(fault)
+       }
+
+       // Handle property failures
+       for name, result := range results {
+           if result.IsFail() {
+               log.Warningf("Property %s failed: %s", name, result.Reason)
+           }
+       }
+
+       if !running {
+           // Simulation ended
+           handleSimulationEnd()
+       }
+   }
+
+9. Add simulation listener for Bloodhound event stream:
+
+   type bloodhoundEventListener struct {
+       eventChan chan dst.BloodhoundEvent
+   }
+
+   func (l *bloodhoundEventListener) OnSimulationStart(config dst.SimulationConfig) {
+       l.eventChan <- dst.BloodhoundEvent{
+           Type: dst.EventSimulationStart,
+           Data: map[string]interface{}{
+               "seed":      config.Seed,
+               "max_steps": config.MaxSteps,
+           },
+       }
+   }
+
+   func (l *bloodhoundEventListener) OnFaultInjected(fault dst.Fault) {
+       l.eventChan <- dst.BloodhoundEvent{
+           Type: dst.EventFaultInjected,
+           Data: map[string]interface{}{
+               "fault_type": string(fault.Type),
+               "target":     fault.Target,
+           },
+       }
+   }
+
+   // ... other listener methods
+
+10. State space exploration with branching:
+
+    coord := dst.GetGlobalCoordinator()
+    tree := coord.GetSnapshotTree()
+    fi := coord.GetFaultInjector()
+
+    // Run base simulation
+    coord.Start()
+    for i := 0; i < 100; i++ {
+        coord.Step(1000000)
+    }
+
+    // Save branch point
+    branchID := tree.GetCurrentID()
+
+    // Explore variant 1: inject partition
+    coord.RestoreToSnapshot(branchID)
+    fi.Schedule(coord.GetCurrentTime()+1000000, dst.Fault{
+        Type:   dst.FaultNetworkPartition,
+        Target: "node1",
+    })
+    for i := 0; i < 100; i++ {
+        coord.Step(1000000)
+    }
+    variant1ID := tree.GetCurrentID()
+
+    // Explore variant 2: inject crash
+    coord.RestoreToSnapshot(branchID)
+    fi.Schedule(coord.GetCurrentTime()+1000000, dst.Fault{
+        Type:   dst.FaultProcessCrash,
+        Target: "node2",
+    })
+    for i := 0; i < 100; i++ {
+        coord.Step(1000000)
+    }
+    variant2ID := tree.GetCurrentID()
+
+    // Compare results
+    compareExecutions(variant1ID, variant2ID)
+
+11. Cleanup on container exit:
+
+    func (l *Loader) destroyContainer() {
+        coord := dst.GetGlobalCoordinator()
+        if coord != nil {
+            coord.Stop("container destroyed")
+
+            // Log final statistics
+            stats := coord.GetFaultInjector().GetStats()
+            log.Infof("DST simulation complete: %d steps, %d faults injected",
+                coord.GetStepCount(), stats.FaultsInjected)
+
+            failures := coord.GetPropertyChecker().GetFailures()
+            for name, results := range failures {
+                log.Warningf("Property %s failed %d times", name, len(results))
+            }
+        }
+    }
+
+FAULT INJECTION POINTS:
+
+The following locations should check for fault injection:
+
+1. Syscall entry/exit:
+   - pkg/sentry/kernel/task_syscall.go
+   - Check: FaultSyscallEINTR, FaultSyscallEIO, FaultSyscallENOMEM, FaultSyscallEAGAIN
+
+2. Network send/receive:
+   - pkg/tcpip/link/*/endpoint.go
+   - Check: FaultNetworkDrop, FaultNetworkDelay, FaultNetworkCorrupt
+
+3. File read/write:
+   - pkg/sentry/fsimpl/*/regular_file.go
+   - Check: FaultDiskWriteFailure, FaultDiskReadFailure, FaultDiskCorruption
+
+4. Memory allocation:
+   - pkg/sentry/mm/mm.go
+   - Check: FaultMemoryPressure, FaultMemoryCorruption
+
+5. Process operations:
+   - pkg/sentry/kernel/task_start.go
+   - Check: FaultProcessCrash, FaultProcessPause
+
+6. Time operations:
+   - pkg/sentry/time/
+   - Check: FaultClockSkew, FaultClockJump, FaultClockPause
+
+DETERMINISM REQUIREMENTS:
+
+1. All fault decisions must use deterministic RNG
+2. Fault injection order must be deterministic
+3. Property check results must be reproducible
+4. Same seed = identical fault injection pattern
+
+INTEGRATION WITH BLOODHOUND RUST CODE:
+
+The gVisor DST package provides:
+- FaultInjector: Maps to Bloodhound's FaultActor
+- PropertyChecker: Maps to Bloodhound's property module
+- SimulationCoordinator: Maps to Bloodhound's SimulationCoordinator
+- SnapshotTree: Maps to Bloodhound's StateSnapshot system
+
+Communication options:
+1. IPC via Unix socket with JSON events
+2. Shared memory for high-frequency state
+3. gRPC for structured communication
+
+Example event stream format:
+{
+    "type": "fault_injected",
+    "time_ns": 1000000000,
+    "step_count": 500,
+    "data": {
+        "fault_type": "process_crash",
+        "target": "node1",
+        "duration": 0
+    }
+}

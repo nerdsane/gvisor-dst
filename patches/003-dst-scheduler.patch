@@ -1,0 +1,187 @@
+From: Bloodhound Project
+Subject: [PATCH] Add Deterministic Scheduler support for DST mode
+
+This patch adds support for deterministic task scheduling in DST mode.
+When enabled, task execution order is controlled deterministically based
+on thread ID ordering, ensuring reproducible execution.
+
+---
+ runsc/boot/loader.go                 | 15 +++++++++++++++
+ pkg/sentry/kernel/task_run.go        | 12 ++++++++++++
+ pkg/sentry/kernel/task_start.go      |  8 ++++++++
+ pkg/sentry/kernel/task_block.go      | 10 ++++++++++
+ pkg/sentry/kernel/task_syscall.go    |  8 ++++++++
+ 5 files changed, 53 insertions(+)
+
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index abc1234..def5678 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -45,6 +45,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/time"
++	"gvisor.dev/gvisor/pkg/sentry/kernel"
+ 	...
+ )
+
+ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+@@ -598,6 +599,20 @@ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+ 		return nil, fmt.Errorf("creating vdso: %w", err)
+ 	}
+
++	// Enable deterministic scheduling if DST mode is requested.
++	// This must be done before any tasks are created.
++	if dstConfig.Enabled {
++		kernel.EnableDSTScheduling(kernel.DSTConfig{
++			Enabled: true,
++			Seed:    dstConfig.Seed,
++		})
++		log.Infof("DST scheduling enabled with seed %d", dstConfig.Seed)
++	}
++
+ 	// Create timekeeper with appropriate clock source.
+ 	tk := kernel.NewTimekeeper()
+--
+diff --git a/pkg/sentry/kernel/task_start.go b/pkg/sentry/kernel/task_start.go
+index abc1234..def5678 100644
+--- a/pkg/sentry/kernel/task_start.go
++++ b/pkg/sentry/kernel/task_start.go
+@@ -403,6 +403,14 @@ func (t *Task) Start(tid ThreadID) {
+ 	if t.runState == nil {
+ 		return
+ 	}
++
++	// DST: Register task with deterministic scheduler before starting.
++	if IsDSTSchedulingEnabled() {
++		DefaultDSTHooks.OnTaskStart(t, tid)
++	}
++
+ 	t.goroutineStopped.Add(1)
+ 	t.tg.liveGoroutines.Add(1)
+--
+diff --git a/pkg/sentry/kernel/task_run.go b/pkg/sentry/kernel/task_run.go
+index abc1234..def5678 100644
+--- a/pkg/sentry/kernel/task_run.go
++++ b/pkg/sentry/kernel/task_run.go
+@@ -95,6 +95,18 @@ func (t *Task) run(threadID uintptr) {
+ 		t.doStop()
+ 		t.runState = t.runState.execute(t)
+ 		if t.runState == nil {
++			// DST: Unregister task when exiting.
++			if IsDSTSchedulingEnabled() {
++				// Get TID for this task.
++				t.tg.pidns.owner.mu.RLock()
++				tid := t.tg.pidns.tids[t]
++				t.tg.pidns.owner.mu.RUnlock()
++				DefaultDSTHooks.OnTaskExit(t, tid)
++			}
++
+ 			t.accountTaskGoroutineEnter(TaskGoroutineNonexistent)
+ 			t.goroutineStopped.Done()
+--
+diff --git a/pkg/sentry/kernel/task_block.go b/pkg/sentry/kernel/task_block.go
+index abc1234..def5678 100644
+--- a/pkg/sentry/kernel/task_block.go
++++ b/pkg/sentry/kernel/task_block.go
+@@ -163,6 +163,16 @@ func (t *Task) block(C <-chan struct{}, timerChan <-chan struct{}) error {
+ 	t.prepareSleep()
+ 	defer t.completeSleep()
+
++	// DST: Notify scheduler that task is blocking.
++	if IsDSTSchedulingEnabled() {
++		t.tg.pidns.owner.mu.RLock()
++		tid := t.tg.pidns.tids[t]
++		t.tg.pidns.owner.mu.RUnlock()
++		DefaultDSTHooks.OnTaskBlock(t, tid)
++		defer DefaultDSTHooks.OnTaskUnblock(t, tid)
++	}
++
+ 	// If the request is not completed, but the timer has already expired,
+--
+diff --git a/pkg/sentry/kernel/task_syscall.go b/pkg/sentry/kernel/task_syscall.go
+index abc1234..def5678 100644
+--- a/pkg/sentry/kernel/task_syscall.go
++++ b/pkg/sentry/kernel/task_syscall.go
+@@ -339,6 +339,14 @@ func (t *Task) doSyscallInvoke(sysno uintptr, args arch.SyscallArguments) taskRu
+ 		t.Arch().SetReturn(rval)
+ 	}
+
++	// DST: Yield after syscall for deterministic interleaving.
++	if IsDSTSchedulingEnabled() {
++		t.tg.pidns.owner.mu.RLock()
++		tid := t.tg.pidns.tids[t]
++		t.tg.pidns.owner.mu.RUnlock()
++		DefaultDSTHooks.OnSyscallExit(t, tid, sysno)
++	}
++
+ 	return (*runSyscallExit)(nil).execute(t)
+ }
+--
+End of patch
+
+INTEGRATION NOTES:
+
+1. Enable DST scheduling during container creation:
+   kernel.EnableDSTScheduling(kernel.DSTConfig{
+       Enabled: true,
+       Seed:    seed,
+   })
+
+2. The scheduler controls task execution order:
+   - Tasks are scheduled in TID order (lowest TID first)
+   - Each task yields after completing a syscall
+   - Blocked tasks are removed from the ready queue
+   - Unblocked tasks are added back to the ready queue
+
+3. Key integration points:
+   - task_start.go: Register task with scheduler on Start()
+   - task_run.go: Unregister task on exit
+   - task_block.go: Notify scheduler when task blocks/unblocks
+   - task_syscall.go: Yield after syscall completes
+
+4. Checkpointing support:
+
+   // Save scheduler state
+   schedState := kernel.GetDSTKernelState()
+
+   // Later, restore scheduler state
+   kernel.RestoreDSTKernelState(schedState)
+
+5. Combined DST state (time + RNG + scheduler):
+
+   type DSTSnapshot struct {
+       TimeState      time.VirtualClocksState
+       RNGState       *rand.DSTState
+       SchedulerState *kernel.DSTKernelState
+   }
+
+   // Save all DST state
+   func SaveDSTSnapshot() *DSTSnapshot {
+       return &DSTSnapshot{
+           TimeState:      time.GetVirtualClocks(clocks).GetState(),
+           RNGState:       rand.GetDSTState(),
+           SchedulerState: kernel.GetDSTKernelState(),
+       }
+   }
+
+   // Restore all DST state
+   func RestoreDSTSnapshot(snap *DSTSnapshot) {
+       time.GetVirtualClocks(clocks).SetState(snap.TimeState)
+       rand.RestoreDSTState(snap.RNGState)
+       kernel.RestoreDSTKernelState(snap.SchedulerState)
+   }
+
+6. Cleanup on container exit:
+
+   if kernel.IsDSTSchedulingEnabled() {
+       kernel.DisableDSTScheduling()
+   }
+
+7. Performance considerations:
+   - DST scheduling adds overhead due to coordination
+   - Use only for testing, not production
+   - Single-threaded effective execution (tasks run one at a time)
+
+8. Debugging:
+   - GetYieldCounter() returns total yields for verification
+   - Add listeners to track scheduling decisions
+   - Scheduler state can be inspected via GetState()

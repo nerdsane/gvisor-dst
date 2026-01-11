@@ -8,6 +8,8 @@ package(
 go_library(
     name = "rand",
     srcs = [
+        "deterministic.go",
+        "dst.go",
         "rand.go",
         "rand_linux.go",
         "rng.go",
@@ -21,6 +23,9 @@ go_library(
 
 go_test(
     name = "rand_test",
-    srcs = ["rng_test.go"],
+    srcs = [
+        "deterministic_test.go",
+        "rng_test.go",
+    ],
     library = ":rand",
 )

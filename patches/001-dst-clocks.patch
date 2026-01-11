@@ -1,0 +1,74 @@
+From: Bloodhound Project
+Subject: [PATCH] Add Deterministic Simulation Testing (DST) clock support
+
+This patch adds support for virtual clocks in DST mode. When DST is enabled,
+gVisor uses VirtualClocks instead of CalibratedClocks, allowing for
+deterministic execution where the same seed produces identical time sequences.
+
+---
+ runsc/boot/loader.go | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index abc1234..def5678 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -598,9 +598,20 @@ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+ 		return nil, fmt.Errorf("creating vdso: %w", err)
+ 	}
+
+-	// Create timekeeper.
++	// Create timekeeper with appropriate clock source.
++	// In DST mode, use virtual clocks for deterministic execution.
+ 	tk := kernel.NewTimekeeper()
+ 	params := kernel.NewVDSOParamPage(l.k.MemoryFile(), vdso.ParamPage.FileRange())
+-	tk.SetClocks(time.NewCalibratedClocks(), params)
++
++	// TODO: Get DST config from args.Conf when DST flags are added
++	dstConfig := time.DSTClocksConfig{
++		Enabled:          false, // Set to true to enable DST mode
++		InitialRealtime:  0,     // Unix epoch
++		InitialMonotonic: 0,
++	}
++	clocks := time.NewClocks(dstConfig)
++	tk.SetClocks(clocks, params)
++
++	// Store VirtualClocks reference for time advancement if in DST mode
++	// l.virtualClocks = time.GetVirtualClocks(clocks)
+
+ 	if err := enableStrace(args.Conf); err != nil {
+ 		return nil, fmt.Errorf("enabling strace: %w", err)
+--
+End of patch
+
+INTEGRATION NOTES:
+
+1. To enable DST mode, the caller needs to:
+   - Set dstConfig.Enabled = true
+   - Optionally set InitialRealtime to a specific Unix timestamp
+   - Store the VirtualClocks reference for time advancement
+
+2. Time advancement in DST mode:
+   - Get the VirtualClocks: vc := time.GetVirtualClocks(clocks)
+   - Advance time: vc.Advance(nanoseconds)
+   - Typically advance after each syscall or at scheduling points
+
+3. For full integration, additional changes needed:
+   - Add DST flags to runsc/config/config.go
+   - Register flags in runsc/config/flags.go
+   - Pass DST config through CreateArgs
+   - Add syscall hooks to advance virtual time
+
+4. Example usage from Bloodhound:
+
+   // Start container in DST mode
+   dstConfig := time.DSTClocksConfig{
+       Enabled:          true,
+       InitialRealtime:  1704067200_000_000_000, // Jan 1, 2024
+       InitialMonotonic: 0,
+   }
+
+   // After each syscall, advance time
+   if vc := time.GetVirtualClocks(clocks); vc != nil {
+       vc.Advance(1000) // 1 microsecond
+   }

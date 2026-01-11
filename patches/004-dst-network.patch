@@ -1,0 +1,157 @@
+From: Bloodhound Project
+Subject: [PATCH] Add Deterministic Network support for DST mode
+
+This patch adds support for deterministic networking in DST mode.
+When enabled, packet delivery is controlled deterministically with
+support for simulated delays, packet loss, and network partitions.
+
+---
+ runsc/boot/loader.go           | 20 ++++++++++++++++++++
+ pkg/sentry/kernel/kernel.go    | 10 ++++++++++
+ 2 files changed, 30 insertions(+)
+
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index abc1234..def5678 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -45,6 +45,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/time"
+ 	"gvisor.dev/gvisor/pkg/rand"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel"
++	"gvisor.dev/gvisor/pkg/tcpip/link/dst"
+ 	...
+ )
+
+ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+@@ -598,6 +599,25 @@ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+ 	// Enable deterministic scheduling if DST mode is requested.
+ 	kernel.EnableDSTScheduling(...)
+
++	// Enable deterministic networking if DST mode is requested.
++	if dstConfig.Enabled {
++		dst.EnableDSTNetwork(dst.DSTNetworkConfig{
++			Enabled:                  true,
++			Seed:                     dstConfig.Seed,
++			DefaultDelayNS:           dstConfig.NetworkDelayNS,
++			PacketLossProbability:    dstConfig.PacketLossProbability,
++			PacketReorderProbability: dstConfig.PacketReorderProbability,
++		})
++		log.Infof("DST networking enabled with seed %d, delay %dns",
++			dstConfig.Seed, dstConfig.NetworkDelayNS)
++	}
++
+ 	// Create timekeeper with appropriate clock source.
+ 	tk := kernel.NewTimekeeper()
+--
+End of patch
+
+INTEGRATION NOTES:
+
+1. Enable DST networking during container creation:
+
+   dst.EnableDSTNetwork(dst.DSTNetworkConfig{
+       Enabled:        true,
+       Seed:           seed,
+       DefaultDelayNS: 1000000, // 1ms default delay
+   })
+
+2. Create endpoints for network interfaces:
+
+   network := dst.GetDSTNetwork()
+   ep1 := network.CreateEndpoint(1, 1500, "aa:bb:cc:dd:ee:01")
+   ep2 := network.CreateEndpoint(2, 1500, "aa:bb:cc:dd:ee:02")
+   network.Connect(1, 2)
+
+3. Deliver packets when virtual time advances:
+
+   // In the DST time advancement loop:
+   dst.AdvanceNetworkTime(deltaTimeNS)
+
+   // Or deliver all immediately:
+   dst.DeliverAllPackets()
+
+4. Fault injection during simulation:
+
+   // Inject packet loss
+   dst.SetPacketLossProbability(0.1) // 10% loss
+
+   // Inject packet reordering
+   dst.SetPacketReorderProbability(0.05) // 5% reorder
+
+   // Inject network delay
+   dst.SetNetworkDelay(10_000_000) // 10ms
+
+5. Network partitions:
+
+   // Create a partition between nodes
+   dst.CreatePartition(
+       []dst.EndpointID{1, 2},    // Set A
+       []dst.EndpointID{3, 4, 5}, // Set B
+   )
+
+   // Heal the partition
+   dst.HealPartition(
+       []dst.EndpointID{1, 2},
+       []dst.EndpointID{3, 4, 5},
+   )
+
+6. Checkpointing:
+
+   // Save network state
+   netState := dst.GetDSTNetworkState()
+
+   // Restore network state
+   dst.RestoreDSTNetworkState(netState)
+
+7. Combined with other DST components:
+
+   type FullDSTSnapshot struct {
+       TimeState      *time.VirtualClocksState
+       RNGState       *rand.DSTState
+       SchedulerState *kernel.DSTKernelState
+       NetworkState   *dst.DSTNetworkState
+   }
+
+8. Integration with Bloodhound fault injection:
+
+   // In fault actor, inject network faults:
+   if shouldInjectFault("network_partition") {
+       dst.CreatePartition(partitionA, partitionB)
+   }
+
+   if shouldInjectFault("packet_loss") {
+       dst.SetPacketLossProbability(faultActor.RandomFloat())
+   }
+
+9. Using with virtual time:
+
+   // Coordinate network delivery with virtual time
+   func advanceSimulation(deltaNS uint64) {
+       // First advance virtual time
+       virtualClocks.Advance(deltaNS)
+
+       // Then deliver any pending packets
+       dst.AdvanceNetworkTime(virtualClocks.GetMonotonicTime())
+   }
+
+10. Cleanup on container exit:
+
+    if dst.IsDSTNetworkEnabled() {
+        dst.DisableDSTNetwork()
+    }
+
+PACKET ORDERING GUARANTEE:
+
+Packets are delivered in deterministic order based on:
+1. Delivery time (virtual time when packet should arrive)
+2. Packet ID (unique sequence number, breaks ties)
+
+This ensures that given the same inputs and seed, packet delivery
+order is always identical across runs.
+
+PERFORMANCE CONSIDERATIONS:
+
+- DST networking adds overhead due to packet queuing and ordering
+- Use only for testing, not production
+- For high-throughput tests, consider batching packet delivery
+- Packet cloning is used to preserve original packet data

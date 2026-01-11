@@ -36,6 +36,8 @@ go_library(
         "vdso.go",
         "vdso_amd64.s",
         "vdso_arm64.s",
+        "virtual_clocks.go",
+        "dst.go",
     ],
     visibility = ["//:sandbox"],
     deps = [
@@ -56,6 +58,7 @@ go_test(
         "parameters_test.go",
         "sampler_test.go",
         "vdso_test.go",
+        "virtual_clocks_test.go",
     ],
     library = ":time",
     deps = [

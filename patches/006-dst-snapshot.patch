@@ -1,0 +1,373 @@
+From: Bloodhound Project
+Subject: [PATCH] Add DST Save/Restore support for simulation testing
+
+This patch adds support for fast snapshot/restore capabilities in DST mode.
+When enabled, the simulation can take lightweight snapshots of DST state
+and restore to any previous point for state space exploration.
+
+---
+ runsc/boot/loader.go           | 30 ++++++++++++++++++++++++++++++
+ pkg/sentry/kernel/kernel.go    | 25 +++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+)
+
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index abc1234..def5678 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -45,6 +45,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/time"
+ 	"gvisor.dev/gvisor/pkg/rand"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel"
++	"gvisor.dev/gvisor/pkg/sentry/dst"
+ 	fsdst "gvisor.dev/gvisor/pkg/sentry/fsimpl/dst"
+ 	netdst "gvisor.dev/gvisor/pkg/tcpip/link/dst"
+ 	...
+ )
+
+ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+@@ -620,6 +621,35 @@ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+ 	// Enable deterministic filesystem if DST mode is requested.
+ 	fsdst.EnableDSTFilesystem(...)
+
++	// Initialize DST snapshot tree if DST mode is requested.
++	if dstConfig.Enabled {
++		l.dstSnapshotTree = dst.NewSnapshotTree(dstConfig.MaxSnapshots)
++
++		// Create initial snapshot
++		initialState := l.captureDSTState()
++		initialState.Metadata.Description = "initial"
++		_, err := l.dstSnapshotTree.CreateSnapshot(initialState, nil)
++		if err != nil {
++			log.Warningf("Failed to create initial DST snapshot: %v", err)
++		}
++		log.Infof("DST snapshot tree initialized with max %d snapshots",
++			dstConfig.MaxSnapshots)
++	}
++
+ 	// Create timekeeper with appropriate clock source.
+ 	tk := kernel.NewTimekeeper()
+--
+End of patch
+
+INTEGRATION NOTES:
+
+1. Add snapshot tree to Loader struct:
+
+   type Loader struct {
+       ...
+       // dstSnapshotTree manages DST state snapshots for exploration.
+       dstSnapshotTree *dst.SnapshotTree
+   }
+
+2. Capture DST state from all components:
+
+   func (l *Loader) captureDSTState() *dst.DSTState {
+       state := &dst.DSTState{
+           Metadata: dst.SnapshotMetadata{
+               Seed:          l.dstConfig.Seed,
+               VirtualTimeNS: time.GetVirtualTime(),
+               StepCount:     l.stepCount,
+           },
+       }
+
+       // Capture time state
+       if vc := time.GetVirtualClocks(); vc != nil {
+           mono, real, cycles := vc.GetState()
+           state.TimeState = &dst.VirtualTimeState{
+               MonotonicNS: mono,
+               RealtimeNS:  real,
+               Cycles:      cycles,
+           }
+       }
+
+       // Capture RNG state
+       if rngState := rand.GetDSTState(); rngState != nil {
+           state.RNGState = &dst.RNGState{
+               State:   rngState.State,
+               Counter: rngState.Counter,
+               Buffer:  rngState.Buffer,
+               BufPos:  rngState.BufPos,
+           }
+       }
+
+       // Capture scheduler state
+       if schedState := kernel.GetDSTKernelState(); schedState != nil {
+           state.SchedulerState = convertSchedulerState(schedState)
+       }
+
+       // Capture network state
+       if netState := netdst.GetDSTNetworkState(); netState != nil {
+           state.NetworkState = convertNetworkState(netState)
+       }
+
+       // Capture filesystem state
+       if fsState := fsdst.GetDSTFilesystemState(); fsState != nil {
+           state.FilesystemState = convertFilesystemState(fsState)
+       }
+
+       return state
+   }
+
+3. Restore DST state to all components:
+
+   func (l *Loader) restoreDSTState(state *dst.DSTState) error {
+       // Restore time state
+       if state.TimeState != nil {
+           vc := time.GetVirtualClocks()
+           if vc != nil {
+               vc.SetState(state.TimeState.MonotonicNS,
+                          state.TimeState.RealtimeNS,
+                          state.TimeState.Cycles)
+           }
+       }
+
+       // Restore RNG state
+       if state.RNGState != nil {
+           rand.RestoreDSTState(&rand.DSTState{
+               State:   state.RNGState.State,
+               Counter: state.RNGState.Counter,
+               Buffer:  state.RNGState.Buffer,
+               BufPos:  state.RNGState.BufPos,
+           })
+       }
+
+       // Restore scheduler state
+       if state.SchedulerState != nil {
+           kernel.RestoreDSTKernelState(convertToKernelState(state.SchedulerState))
+       }
+
+       // Restore network state
+       if state.NetworkState != nil {
+           netdst.RestoreDSTNetworkState(convertToNetworkState(state.NetworkState))
+       }
+
+       // Restore filesystem state
+       if state.FilesystemState != nil {
+           fsdst.RestoreDSTFilesystemState(convertToFilesystemState(state.FilesystemState))
+       }
+
+       return nil
+   }
+
+4. Create snapshots at key points:
+
+   // After each simulation step or syscall
+   func (l *Loader) afterSimulationStep() {
+       if l.dstSnapshotTree == nil {
+           return
+       }
+
+       // Optionally create snapshot based on policy
+       if l.shouldSnapshot() {
+           state := l.captureDSTState()
+           state.Metadata.StepCount = l.stepCount
+           state.Metadata.Description = fmt.Sprintf("step-%d", l.stepCount)
+
+           _, err := l.dstSnapshotTree.CreateSnapshot(state, nil)
+           if err != nil {
+               log.Warningf("Failed to create snapshot: %v", err)
+           }
+       }
+   }
+
+5. Restore to snapshot for exploration:
+
+   func (l *Loader) RestoreToSnapshot(snapshotID dst.SnapshotID) error {
+       if l.dstSnapshotTree == nil {
+           return errors.New("DST mode not enabled")
+       }
+
+       state, err := l.dstSnapshotTree.RestoreSnapshot(snapshotID)
+       if err != nil {
+           return err
+       }
+
+       return l.restoreDSTState(state)
+   }
+
+6. Fork execution for branching exploration:
+
+   func (l *Loader) ForkExecution(description string) (dst.SnapshotID, error) {
+       if l.dstSnapshotTree == nil {
+           return dst.InvalidSnapshotID, errors.New("DST mode not enabled")
+       }
+
+       // Create snapshot at current point
+       state := l.captureDSTState()
+       state.Metadata.Description = description
+
+       return l.dstSnapshotTree.CreateSnapshot(state, nil)
+   }
+
+7. Explore multiple execution paths:
+
+   func (l *Loader) ExploreFromSnapshot(snapshotID dst.SnapshotID, variants int) []dst.SnapshotID {
+       results := make([]dst.SnapshotID, 0, variants)
+
+       for i := 0; i < variants; i++ {
+           // Restore to snapshot
+           state, err := l.dstSnapshotTree.RestoreSnapshot(snapshotID)
+           if err != nil {
+               continue
+           }
+           l.restoreDSTState(state)
+
+           // Modify RNG seed for different execution path
+           newSeed := state.Metadata.Seed + uint64(i+1)
+           rand.Reseed(newSeed)
+
+           // Run some simulation steps
+           for j := 0; j < 100; j++ {
+               l.simulationStep()
+           }
+
+           // Create snapshot of this variant
+           variantState := l.captureDSTState()
+           variantState.Metadata.Description = fmt.Sprintf("variant-%d", i)
+           id, _ := l.dstSnapshotTree.CreateSnapshot(variantState, nil)
+           results = append(results, id)
+       }
+
+       return results
+   }
+
+8. Save snapshot tree to disk:
+
+   func (l *Loader) SaveSnapshotTree(path string) error {
+       file, err := os.Create(path)
+       if err != nil {
+           return err
+       }
+       defer file.Close()
+
+       // Iterate all snapshots and serialize
+       // Implementation depends on snapshot tree iteration API
+       return nil
+   }
+
+9. Load snapshot tree from disk:
+
+   func (l *Loader) LoadSnapshotTree(path string) error {
+       file, err := os.Open(path)
+       if err != nil {
+           return err
+       }
+       defer file.Close()
+
+       // Deserialize and rebuild tree
+       return nil
+   }
+
+10. Bloodhound integration for state space exploration:
+
+    // In Bloodhound simulation coordinator:
+    func (c *Coordinator) exploreStateSpace() {
+        // Start from root
+        rootID := c.loader.GetSnapshotTree().GetRootID()
+
+        // BFS/DFS exploration
+        queue := []dst.SnapshotID{rootID}
+        visited := make(map[dst.SnapshotID]bool)
+
+        for len(queue) > 0 {
+            current := queue[0]
+            queue = queue[1:]
+
+            if visited[current] {
+                continue
+            }
+            visited[current] = true
+
+            // Restore to this snapshot
+            c.loader.RestoreToSnapshot(current)
+
+            // Run simulation with fault injection
+            for i := 0; i < stepsPerExploration; i++ {
+                if c.faultActor.ShouldInjectFault() {
+                    c.injectFault()
+                }
+                c.loader.SimulationStep()
+            }
+
+            // Create snapshot of result
+            resultID, _ := c.loader.ForkExecution("exploration-result")
+            queue = append(queue, resultID)
+
+            // Check invariants
+            if !c.checkInvariants() {
+                c.reportBug(current, resultID)
+            }
+        }
+    }
+
+COW MEMORY INTEGRATION:
+
+For full CoW memory support, integrate with gVisor's MemoryFile:
+
+1. Before taking snapshot:
+   - Mark all pages as read-only for CoW
+   - Create CoWPageStore from MemoryFile
+
+2. On page write after snapshot:
+   - Trap the write fault
+   - Copy the page to new location
+   - Allow write to proceed
+
+3. On restore:
+   - Point to snapshot's CoW pages
+   - Mark as read-only for new CoW chain
+
+This requires deeper integration with pkg/sentry/pgalloc/memoryfile.go.
+
+SNAPSHOT POLICIES:
+
+Different policies for when to take snapshots:
+
+1. Time-based: Every N virtual nanoseconds
+2. Step-based: Every N simulation steps
+3. Event-based: On specific events (syscalls, faults, etc.)
+4. Manual: Only when explicitly requested
+
+   type SnapshotPolicy struct {
+       Mode            string // "time", "step", "event", "manual"
+       TimeIntervalNS  int64
+       StepInterval    uint64
+       EventTypes      []string
+   }
+
+PERFORMANCE CONSIDERATIONS:
+
+1. Snapshot creation: O(DST state size)
+   - DST state is small compared to full memory
+   - Sub-millisecond for typical workloads
+
+2. Snapshot restore: O(DST state size)
+   - Deep copy of state structures
+   - No memory page copying with CoW
+
+3. Memory overhead:
+   - ~1KB per snapshot (DST state only)
+   - With CoW: only modified pages copied
+
+4. Pruning strategies:
+   - Keep only N most recent
+   - Keep only path to current
+   - Keep only branch points
+
+DETERMINISM VERIFICATION:
+
+Use snapshots to verify determinism:
+
+   func VerifyDeterminism(snapshotID dst.SnapshotID, steps int) bool {
+       // Run from snapshot twice
+       results := make([][]byte, 2)
+       for i := 0; i < 2; i++ {
+           loader.RestoreToSnapshot(snapshotID)
+           for j := 0; j < steps; j++ {
+               loader.SimulationStep()
+           }
+           state := loader.CaptureDSTState()
+           results[i], _ = dst.SerializeDSTState(state)
+       }
+       return bytes.Equal(results[0], results[1])
+   }
