@@ -167,6 +167,9 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 	flagSet.String("nvproxy-allowed-driver-capabilities", "utility,compute", "Comma separated list of NVIDIA driver capabilities that are allowed to be requested by the container. If 'all' is specified here, it is resolved to all driver capabilities supported in nvproxy. If 'all' is requested by the container, it is resolved to this list.")
 	flagSet.Bool("tpuproxy", false, "EXPERIMENTAL: enable support for TPU device passthrough.")
 
+	// Deterministic Simulation Testing (DST) flags.
+	RegisterDSTFlags(flagSet)
+
 	// Test flags, not to be used outside tests, ever.
 	flagSet.Bool("TESTONLY-unsafe-nonroot", false, "TEST ONLY; do not ever use! This skips many security measures that isolate the host from the sandbox.")
 	flagSet.String("TESTONLY-test-name-env", "", "TEST ONLY; do not ever use! Used for automated tests to improve logging.")
@@ -267,6 +270,9 @@ func NewFromFlags(flagSet *flag.FlagSet) (*Config, error) {
 		}
 	}
 
+	// Populate DST config from flags (DST flags use separate registration).
+	conf.DST = DSTConfigFromFlags(flagSet)
+
 	if err := conf.validate(); err != nil {
 		return nil, err
 	}
@@ -319,7 +325,32 @@ func (c *Config) ToFlags() []string {
 		rv = append(rv, fmt.Sprintf("--%s=%s", name, val))
 	}
 
-	// Construct a temporary set for default plumbing.
+	// Add DST flags explicitly (they use a separate struct without flag tags).
+	if c.DST.Enabled {
+		rv = append(rv, "--dst")
+		rv = append(rv, fmt.Sprintf("--dst-seed=%d", c.DST.Seed))
+		rv = append(rv, fmt.Sprintf("--dst-initial-time=%d", c.DST.InitialRealtime))
+		rv = append(rv, fmt.Sprintf("--dst-time-advance=%d", c.DST.VirtualTimeAdvanceNS))
+		if c.DST.ControlSocket != "" {
+			rv = append(rv, fmt.Sprintf("--dst-control-socket=%s", c.DST.ControlSocket))
+		}
+		if c.DST.MaxSteps > 0 {
+			rv = append(rv, fmt.Sprintf("--dst-max-steps=%d", c.DST.MaxSteps))
+		}
+		if c.DST.MaxTimeNS > 0 {
+			rv = append(rv, fmt.Sprintf("--dst-max-time=%d", c.DST.MaxTimeNS))
+		}
+		if c.DST.FaultNetworkDrop > 0 {
+			rv = append(rv, fmt.Sprintf("--dst-fault-network-drop=%f", c.DST.FaultNetworkDrop))
+		}
+		if c.DST.FaultDiskWrite > 0 {
+			rv = append(rv, fmt.Sprintf("--dst-fault-disk-write=%f", c.DST.FaultDiskWrite))
+		}
+		if c.DST.FaultSyscall > 0 {
+			rv = append(rv, fmt.Sprintf("--dst-fault-syscall=%f", c.DST.FaultSyscall))
+		}
+	}
+
 	return rv
 }
 

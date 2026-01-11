@@ -12,6 +12,7 @@ go_library(
         "cgo_enabled.go",
         "config.go",
         "config_bundles.go",
+        "dst.go",
         "flags.go",
     ],
     visibility = ["//:sandbox"],

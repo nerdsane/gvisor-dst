@@ -600,7 +600,16 @@ func New(args Args) (*Loader, error) {
 	// Create timekeeper.
 	tk := kernel.NewTimekeeper()
 	params := kernel.NewVDSOParamPage(l.k.MemoryFile(), vdso.ParamPage.FileRange())
-	tk.SetClocks(time.NewCalibratedClocks(), params)
+
+	// In DST mode, use virtual clocks for deterministic execution.
+	if args.Conf.DST.Enabled {
+		log.Infof("DST mode enabled: seed=%d, control_socket=%q", args.Conf.DST.Seed, args.Conf.DST.ControlSocket)
+		// TODO: Replace with virtual clocks when integrated
+		// For now, use calibrated clocks but log DST config
+		tk.SetClocks(time.NewCalibratedClocks(), params)
+	} else {
+		tk.SetClocks(time.NewCalibratedClocks(), params)
+	}
 
 	if err := enableStrace(args.Conf); err != nil {
 		return nil, fmt.Errorf("enabling strace: %w", err)
