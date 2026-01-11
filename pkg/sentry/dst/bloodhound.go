@@ -1231,11 +1231,10 @@ type SyscallFaultResult struct {
 // This includes stdin/stdout/stderr and common system FDs like epoll, timerfd.
 // Sockets are filtered at the syscall layer before calling this.
 func CheckReadFault(fd int32, target string) SyscallFaultResult {
-	// Skip fault injection on low FDs (0-4).
-	// - 0-2: stdin/stdout/stderr
-	// - 3-4: commonly used for epoll, eventfd (tokio uses fd 4)
-	// Higher FDs are typically actual file handles.
-	if fd >= 0 && fd <= 4 {
+	// Skip fault injection on stdin/stdout/stderr (fd 0-2).
+	// These are typically terminal I/O, not file I/O.
+	// Programs that explicitly open files will use fd >= 3.
+	if fd >= 0 && fd <= 2 {
 		return SyscallFaultResult{}
 	}
 	coord := GetGlobalCoordinator()
@@ -1243,10 +1242,8 @@ func CheckReadFault(fd int32, target string) SyscallFaultResult {
 		return SyscallFaultResult{}
 	}
 	fi := coord.GetFaultInjector()
-	// Debug: Log that we're checking a read fault on a non-filtered fd.
-	log.Warningf("DST CheckReadFault: fd=%d target=%s", fd, target)
 	if fi.ShouldInjectFault(FaultDiskReadFailure, target) {
-		log.Warningf("DST CheckReadFault: INJECTING FAULT fd=%d", fd)
+		log.Warningf("DST: Injecting read fault on fd=%d target=%s", fd, target)
 		return SyscallFaultResult{ShouldFault: true, FaultType: FaultDiskReadFailure}
 	}
 	return SyscallFaultResult{}
@@ -1258,11 +1255,10 @@ func CheckReadFault(fd int32, target string) SyscallFaultResult {
 // This includes stdin/stdout/stderr and common system FDs like epoll, timerfd.
 // Sockets are filtered at the syscall layer before calling this.
 func CheckWriteFault(fd int32, target string) SyscallFaultResult {
-	// Skip fault injection on low FDs (0-4).
-	// - 0-2: stdin/stdout/stderr
-	// - 3-4: commonly used for epoll, eventfd (tokio uses fd 4)
-	// Higher FDs are typically actual file handles.
-	if fd >= 0 && fd <= 4 {
+	// Skip fault injection on stdin/stdout/stderr (fd 0-2).
+	// These are typically terminal I/O, not file I/O.
+	// Programs that explicitly open files will use fd >= 3.
+	if fd >= 0 && fd <= 2 {
 		return SyscallFaultResult{}
 	}
 	coord := GetGlobalCoordinator()
@@ -1270,10 +1266,8 @@ func CheckWriteFault(fd int32, target string) SyscallFaultResult {
 		return SyscallFaultResult{}
 	}
 	fi := coord.GetFaultInjector()
-	// Debug: Log that we're checking a write fault on a non-filtered fd.
-	log.Warningf("DST CheckWriteFault: fd=%d target=%s", fd, target)
 	if fi.ShouldInjectFault(FaultDiskWriteFailure, target) {
-		log.Warningf("DST CheckWriteFault: INJECTING FAULT fd=%d", fd)
+		log.Warningf("DST: Injecting write fault on fd=%d target=%s", fd, target)
 		return SyscallFaultResult{ShouldFault: true, FaultType: FaultDiskWriteFailure}
 	}
 	return SyscallFaultResult{}
