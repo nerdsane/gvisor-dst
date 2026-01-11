@@ -53,6 +53,9 @@ type DSTConfig struct {
 	// FaultDiskWrite is the probability of disk write failures (0.0-1.0).
 	FaultDiskWrite float64
 
+	// FaultDiskRead is the probability of disk read failures (0.0-1.0).
+	FaultDiskRead float64
+
 	// FaultSyscall is the probability of syscall failures (0.0-1.0).
 	FaultSyscall float64
 }
@@ -69,6 +72,7 @@ func DefaultDSTConfig() DSTConfig {
 		MaxTimeNS:            0,
 		FaultNetworkDrop:     0.0,
 		FaultDiskWrite:       0.0,
+		FaultDiskRead:        0.0,
 		FaultSyscall:         0.0,
 	}
 }
@@ -84,6 +88,7 @@ func RegisterDSTFlags(flagSet *flag.FlagSet) {
 	flagSet.Int64("dst-max-time", 0, "maximum virtual time in nanoseconds (0 = unlimited).")
 	flagSet.Float64("dst-fault-network-drop", 0.0, "probability of dropping network packets (0.0-1.0).")
 	flagSet.Float64("dst-fault-disk-write", 0.0, "probability of disk write failures (0.0-1.0).")
+	flagSet.Float64("dst-fault-disk-read", 0.0, "probability of disk read failures (0.0-1.0).")
 	flagSet.Float64("dst-fault-syscall", 0.0, "probability of syscall failures (0.0-1.0).")
 }
 
@@ -99,6 +104,7 @@ func DSTConfigFromFlags(flagSet *flag.FlagSet) DSTConfig {
 		MaxTimeNS:            flag.Get(flagSet.Lookup("dst-max-time").Value).(int64),
 		FaultNetworkDrop:     flag.Get(flagSet.Lookup("dst-fault-network-drop").Value).(float64),
 		FaultDiskWrite:       flag.Get(flagSet.Lookup("dst-fault-disk-write").Value).(float64),
+		FaultDiskRead:        flag.Get(flagSet.Lookup("dst-fault-disk-read").Value).(float64),
 		FaultSyscall:         flag.Get(flagSet.Lookup("dst-fault-syscall").Value).(float64),
 	}
 }
