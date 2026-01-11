@@ -89,11 +89,15 @@ func NewVirtualClocks(cfg VirtualClocksConfig) *VirtualClocks {
 	if cfg.Frequency == 0 {
 		cfg.Frequency = 1_000_000_000 // 1 GHz default
 	}
+	// Initialize baseCycles to current TSC so VDSO time starts at InitialRealtime.
+	// The VDSO calculates: time = BaseRef + (CurrentTSC - BaseCycles) / Frequency
+	// By setting BaseCycles to the current TSC at initialization, time starts at BaseRef (0).
+	initialCycles := Rdtsc()
 	return &VirtualClocks{
 		monotonic:  cfg.InitialMonotonic,
 		realtime:   cfg.InitialRealtime,
 		frequency:  cfg.Frequency,
-		baseCycles: 0,
+		baseCycles: initialCycles,
 	}
 }
 

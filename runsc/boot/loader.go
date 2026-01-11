@@ -609,6 +609,12 @@ func New(args Args) (*Loader, error) {
 	// In DST mode, use virtual clocks for deterministic execution.
 	if args.Conf.DST.Enabled {
 		log.Infof("DST mode enabled: seed=%d, control_socket=%q", args.Conf.DST.Seed, args.Conf.DST.ControlSocket)
+
+		// Enable deterministic random number generation.
+		// This replaces /dev/urandom and getrandom() with a seeded PRNG.
+		rand.EnableDST(args.Conf.DST.Seed)
+		log.Infof("DST: Enabled deterministic RNG with seed=%d", args.Conf.DST.Seed)
+
 		clocks := time.NewClocks(time.DSTClocksConfig{
 			Enabled:          true,
 			InitialRealtime:  args.Conf.DST.InitialRealtime,
