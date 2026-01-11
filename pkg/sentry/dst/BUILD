@@ -9,10 +9,12 @@ go_library(
     name = "dst",
     srcs = [
         "bloodhound.go",
+        "control.go",
         "snapshot.go",
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/log",
         "//pkg/sync",
     ],
 )
