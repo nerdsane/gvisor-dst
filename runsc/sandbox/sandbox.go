@@ -2135,3 +2135,74 @@ func SetCloExeOnAllFDs() (retErr error) {
 	setCloseExecOnce.Do(func() { retErr = setCloExeOnAllFDs() })
 	return
 }
+
+// DSTStep advances the DST simulation by a number of steps.
+func (s *Sandbox) DSTStep(steps uint64, deltaNS int64) (*boot.StepResult, error) {
+	log.Debugf("DSTStep sandbox %q: steps=%d, deltaNS=%d", s.ID, steps, deltaNS)
+	args := boot.StepArgs{
+		Steps:   steps,
+		DeltaNS: deltaNS,
+	}
+	var result boot.StepResult
+	if err := s.call(boot.DSTStep, &args, &result); err != nil {
+		return nil, fmt.Errorf("DST step for sandbox %q: %w", s.ID, err)
+	}
+	return &result, nil
+}
+
+// DSTGetState returns the current DST state.
+func (s *Sandbox) DSTGetState() (*boot.StateResult, error) {
+	log.Debugf("DSTGetState sandbox %q", s.ID)
+	var result boot.StateResult
+	if err := s.call(boot.DSTGetState, nil, &result); err != nil {
+		return nil, fmt.Errorf("DST get state for sandbox %q: %w", s.ID, err)
+	}
+	return &result, nil
+}
+
+// DSTPause pauses the DST simulation.
+func (s *Sandbox) DSTPause() error {
+	log.Debugf("DSTPause sandbox %q", s.ID)
+	if err := s.call(boot.DSTPause, nil, nil); err != nil {
+		return fmt.Errorf("DST pause for sandbox %q: %w", s.ID, err)
+	}
+	return nil
+}
+
+// DSTResume resumes the DST simulation.
+func (s *Sandbox) DSTResume() error {
+	log.Debugf("DSTResume sandbox %q", s.ID)
+	if err := s.call(boot.DSTResume, nil, nil); err != nil {
+		return fmt.Errorf("DST resume for sandbox %q: %w", s.ID, err)
+	}
+	return nil
+}
+
+// DSTGetStats returns DST fault injection statistics.
+func (s *Sandbox) DSTGetStats() (*boot.StatsResult, error) {
+	log.Debugf("DSTGetStats sandbox %q", s.ID)
+	var result boot.StatsResult
+	if err := s.call(boot.DSTGetStats, nil, &result); err != nil {
+		return nil, fmt.Errorf("DST get stats for sandbox %q: %w", s.ID, err)
+	}
+	return &result, nil
+}
+
+// DSTSetFaultProbabilities sets fault injection probabilities.
+func (s *Sandbox) DSTSetFaultProbabilities(args *boot.SetFaultProbabilitiesArgs) error {
+	log.Debugf("DSTSetFaultProbabilities sandbox %q", s.ID)
+	if err := s.call(boot.DSTSetFaultProbabilities, args, nil); err != nil {
+		return fmt.Errorf("DST set fault probabilities for sandbox %q: %w", s.ID, err)
+	}
+	return nil
+}
+
+// DSTScheduleFault schedules a fault for injection at a specific time.
+func (s *Sandbox) DSTScheduleFault(args *boot.ScheduleFaultArgs) (*boot.ScheduleFaultResult, error) {
+	log.Debugf("DSTScheduleFault sandbox %q", s.ID)
+	var result boot.ScheduleFaultResult
+	if err := s.call(boot.DSTScheduleFault, args, &result); err != nil {
+		return nil, fmt.Errorf("DST schedule fault for sandbox %q: %w", s.ID, err)
+	}
+	return &result, nil
+}

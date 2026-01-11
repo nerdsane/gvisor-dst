@@ -217,6 +217,12 @@ func (c *controller) registerHandlers() {
 	c.srv.Register(&control.Metrics{})
 	c.srv.Register(&debug{})
 
+	// Register DST control handler if DST mode is enabled.
+	if l.virtualClocks != nil {
+		c.srv.Register(NewDSTControl(l.virtualClocks))
+		log.Infof("DST control handler registered")
+	}
+
 	if eps, ok := l.k.RootNetworkNamespace().Stack().(*netstack.Stack); ok {
 		c.srv.Register(&Network{
 			Stack:  eps.Stack,

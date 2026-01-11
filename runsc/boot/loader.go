@@ -41,6 +41,7 @@ import (
 	"gvisor.dev/gvisor/pkg/rand"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/control"
+	"gvisor.dev/gvisor/pkg/sentry/dst"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
 	"gvisor.dev/gvisor/pkg/sentry/fdimport"
@@ -295,6 +296,10 @@ type Loader struct {
 	// saveRestoreNet indicates if the saved network stack should be used
 	// during restore.
 	saveRestoreNet bool
+
+	// virtualClocks holds the DST virtual clocks if DST mode is enabled.
+	// nil in normal operation.
+	virtualClocks *time.VirtualClocks
 
 	// restoreErr is the error that occurred during restore.
 	//
@@ -604,9 +609,43 @@ func New(args Args) (*Loader, error) {
 	// In DST mode, use virtual clocks for deterministic execution.
 	if args.Conf.DST.Enabled {
 		log.Infof("DST mode enabled: seed=%d, control_socket=%q", args.Conf.DST.Seed, args.Conf.DST.ControlSocket)
-		// TODO: Replace with virtual clocks when integrated
-		// For now, use calibrated clocks but log DST config
-		tk.SetClocks(time.NewCalibratedClocks(), params)
+		clocks := time.NewClocks(time.DSTClocksConfig{
+			Enabled:          true,
+			InitialRealtime:  args.Conf.DST.InitialRealtime,
+			InitialMonotonic: 0,
+		})
+		tk.SetClocks(clocks, params)
+		l.virtualClocks = time.GetVirtualClocks(clocks)
+
+		// Initialize DST simulation coordinator.
+		dstConfig := dst.SimulationConfig{
+			Seed:     args.Conf.DST.Seed,
+			MaxSteps: args.Conf.DST.MaxSteps,
+			MaxTimeNS: args.Conf.DST.MaxTimeNS,
+			FaultProbabilities: dst.FaultProbabilities{
+				NetworkDrop:      args.Conf.DST.FaultNetworkDrop,
+				DiskWriteFailure: args.Conf.DST.FaultDiskWrite,
+				DiskReadFailure:  args.Conf.DST.FaultDiskRead,
+				SyscallFailure:   args.Conf.DST.FaultSyscall,
+			},
+		}
+		if dstConfig.MaxSteps == 0 {
+			dstConfig.MaxSteps = 1000000 // Default
+		}
+		if dstConfig.MaxTimeNS == 0 {
+			dstConfig.MaxTimeNS = 60 * 1000000000 // 60 seconds default
+		}
+		dst.InitGlobalCoordinator(dstConfig)
+
+		// Connect coordinator to virtual clocks for time advancement.
+		if coord := dst.GetGlobalCoordinator(); coord != nil {
+			if l.virtualClocks != nil {
+				coord.SetVirtualClocks(l.virtualClocks)
+			}
+			// Start the simulation so fault injection is active.
+			coord.Start()
+		}
+		log.Infof("DST coordinator initialized with seed=%d", args.Conf.DST.Seed)
 	} else {
 		tk.SetClocks(time.NewCalibratedClocks(), params)
 	}
@@ -777,6 +816,9 @@ func New(args Args) (*Loader, error) {
 	if err := ctrl.srv.StartServing(); err != nil {
 		return nil, fmt.Errorf("starting control server: %w", err)
 	}
+
+	// Note: DST control is handled via URPC through the existing control server.
+	// The DST.* methods are registered in controller.go when DST mode is enabled.
 
 	return l, nil
 }

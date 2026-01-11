@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"sort"
 
+	"gvisor.dev/gvisor/pkg/log"
+	"gvisor.dev/gvisor/pkg/sentry/time"
 	"gvisor.dev/gvisor/pkg/sync"
 )
 
@@ -181,6 +183,11 @@ type FaultInjector struct {
 
 // NewFaultInjector creates a new fault injector.
 func NewFaultInjector(seed uint64) *FaultInjector {
+	// Xorshift RNG cannot have state 0, so use a default non-zero value.
+	rngState := seed
+	if rngState == 0 {
+		rngState = 0x853c49e6748fea9b // Arbitrary non-zero value
+	}
 	return &FaultInjector{
 		enabled:          true,
 		seed:             seed,
@@ -192,7 +199,7 @@ func NewFaultInjector(seed uint64) *FaultInjector {
 			FaultsByType:   make(map[FaultType]uint64),
 			FaultsByTarget: make(map[string]uint64),
 		},
-		rngState: seed,
+		rngState: rngState,
 	}
 }
 
@@ -215,14 +222,28 @@ func (f *FaultInjector) SetSeed(seed uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.seed = seed
-	f.rngState = seed
+	// Xorshift RNG cannot have state 0, so use a default non-zero value.
+	if seed == 0 {
+		f.rngState = 0x853c49e6748fea9b
+	} else {
+		f.rngState = seed
+	}
 }
 
 // SetProbabilities sets the fault probabilities.
+// Automatically enables fault injection if any probability is non-zero.
 func (f *FaultInjector) SetProbabilities(probs FaultProbabilities) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	log.Warningf("DST SetProbabilities: DiskWrite=%.4f DiskRead=%.4f NetworkDrop=%.4f Syscall=%.4f",
+		probs.DiskWriteFailure, probs.DiskReadFailure, probs.NetworkDrop, probs.SyscallFailure)
 	f.probabilities = probs
+	// Enable fault injection if any probability is non-zero.
+	f.enabled = probs.NetworkDrop > 0 || probs.NetworkDelay > 0 ||
+		probs.NetworkPartition > 0 || probs.DiskWriteFailure > 0 ||
+		probs.DiskReadFailure > 0 || probs.DiskCorruption > 0 ||
+		probs.ProcessCrash > 0 || probs.ProcessPause > 0 ||
+		probs.MemoryPressure > 0 || probs.SyscallFailure > 0
 }
 
 // GetProbabilities returns the current fault probabilities.
@@ -338,13 +359,21 @@ func (f *FaultInjector) NextScheduledTime(afterTimeNS int64) (int64, bool) {
 }
 
 // ShouldInjectFault checks if a fault should be injected based on probability.
-// Uses deterministic RNG.
+// Uses deterministic RNG. Records the fault in stats if injected.
 func (f *FaultInjector) ShouldInjectFault(faultType FaultType, target string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	if !f.enabled {
 		return false
+	}
+
+	// Increment total checks for probability-based faults.
+	f.stats.TotalChecks++
+
+	// Log BEFORE the switch
+	if f.stats.TotalChecks <= 3 {
+		log.Warningf("DST ShouldInjectFault ENTRY: faultType=%v enabled=%v TotalChecks=%d", faultType, f.enabled, f.stats.TotalChecks)
 	}
 
 	var prob float64
@@ -359,6 +388,7 @@ func (f *FaultInjector) ShouldInjectFault(faultType FaultType, target string) bo
 		prob = f.probabilities.DiskWriteFailure
 	case FaultDiskReadFailure:
 		prob = f.probabilities.DiskReadFailure
+		log.Warningf("DST ShouldInjectFault: disk_read_failure prob=%.4f target=%s", prob, target)
 	case FaultDiskReadCorruption, FaultDiskWriteCorruption:
 		prob = f.probabilities.DiskCorruption
 	case FaultProcessCrash:
@@ -373,6 +403,11 @@ func (f *FaultInjector) ShouldInjectFault(faultType FaultType, target string) bo
 		return false
 	}
 
+	// Debug: Always log for first few checks
+	if f.stats.TotalChecks <= 5 {
+		log.Warningf("DST FaultInjector CHECK: faultType=%s prob=%.4f enabled=%v checks=%d", faultType, prob, f.enabled, f.stats.TotalChecks)
+	}
+
 	if prob <= 0 {
 		return false
 	}
@@ -385,7 +420,23 @@ func (f *FaultInjector) ShouldInjectFault(faultType FaultType, target string) bo
 	// Convert to 0.0-1.0 range
 	r := float64(f.rngState) / float64(^uint64(0))
 
-	return r < prob
+	shouldFault := r < prob
+
+	// Debug: Log every 100th check to avoid log spam
+	if f.stats.TotalChecks%100 == 1 {
+		log.Debugf("DST FaultInjector: type=%s prob=%.4f r=%.4f rngState=%d shouldFault=%v", faultType, prob, r, f.rngState, shouldFault)
+	}
+
+	if shouldFault {
+		// Record the fault in stats.
+		f.stats.FaultsInjected++
+		f.stats.FaultsByType[faultType]++
+		if target != "" {
+			f.stats.FaultsByTarget[target]++
+		}
+	}
+
+	return shouldFault
 }
 
 // recordFault records a fault injection in statistics.
@@ -820,6 +871,11 @@ type SimulationCoordinator struct {
 
 	// +checklocks:mu
 	listeners []SimulationListener
+
+	// virtualClocks is the virtual clocks instance for time advancement.
+	// Set via SetVirtualClocks when DST mode is enabled.
+	// +checklocks:mu
+	virtualClocks *time.VirtualClocks
 }
 
 // SimulationListener is notified of simulation events.
@@ -871,6 +927,21 @@ func (c *SimulationCoordinator) AddListener(l SimulationListener) {
 	c.listeners = append(c.listeners, l)
 }
 
+// SetVirtualClocks sets the virtual clocks for time advancement.
+// When set, the Step method will advance virtual time via the clocks.
+func (c *SimulationCoordinator) SetVirtualClocks(vc *time.VirtualClocks) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.virtualClocks = vc
+}
+
+// GetVirtualClocks returns the virtual clocks instance, if set.
+func (c *SimulationCoordinator) GetVirtualClocks() *time.VirtualClocks {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.virtualClocks
+}
+
 // Start starts the simulation.
 func (c *SimulationCoordinator) Start() {
 	c.mu.Lock()
@@ -914,6 +985,11 @@ func (c *SimulationCoordinator) Step(deltaTimeNS int64) ([]Fault, map[string]Che
 
 	c.stepCount++
 	c.currentTimeNS += deltaTimeNS
+
+	// Advance virtual clocks if connected.
+	if c.virtualClocks != nil {
+		c.virtualClocks.Advance(deltaTimeNS)
+	}
 
 	// Check for faults to inject
 	faults := c.faultInjector.CheckInjection(c.currentTimeNS)
@@ -1139,4 +1215,111 @@ func GlobalScheduleFault(triggerTimeNS int64, fault Fault) uint64 {
 		return 0
 	}
 	return coord.GetFaultInjector().Schedule(triggerTimeNS, fault)
+}
+
+// SyscallFaultResult represents the result of a syscall fault check.
+type SyscallFaultResult struct {
+	// ShouldFault indicates if a fault should be injected.
+	ShouldFault bool
+	// FaultType is the type of fault to inject.
+	FaultType FaultType
+}
+
+// CheckReadFault checks if a read syscall should fail.
+// Returns true if the read should fail with an error.
+// fd is the file descriptor - faults are skipped for low-numbered FDs (0-9).
+// This includes stdin/stdout/stderr and common system FDs like epoll, timerfd.
+// Sockets are filtered at the syscall layer before calling this.
+func CheckReadFault(fd int32, target string) SyscallFaultResult {
+	// Skip fault injection on low FDs (0-4).
+	// - 0-2: stdin/stdout/stderr
+	// - 3-4: commonly used for epoll, eventfd (tokio uses fd 4)
+	// Higher FDs are typically actual file handles.
+	if fd >= 0 && fd <= 4 {
+		return SyscallFaultResult{}
+	}
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	// Debug: Log that we're checking a read fault on a non-filtered fd.
+	log.Warningf("DST CheckReadFault: fd=%d target=%s", fd, target)
+	if fi.ShouldInjectFault(FaultDiskReadFailure, target) {
+		log.Warningf("DST CheckReadFault: INJECTING FAULT fd=%d", fd)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultDiskReadFailure}
+	}
+	return SyscallFaultResult{}
+}
+
+// CheckWriteFault checks if a write syscall should fail.
+// Returns true if the write should fail with an error.
+// fd is the file descriptor - faults are skipped for low-numbered FDs (0-9).
+// This includes stdin/stdout/stderr and common system FDs like epoll, timerfd.
+// Sockets are filtered at the syscall layer before calling this.
+func CheckWriteFault(fd int32, target string) SyscallFaultResult {
+	// Skip fault injection on low FDs (0-4).
+	// - 0-2: stdin/stdout/stderr
+	// - 3-4: commonly used for epoll, eventfd (tokio uses fd 4)
+	// Higher FDs are typically actual file handles.
+	if fd >= 0 && fd <= 4 {
+		return SyscallFaultResult{}
+	}
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	// Debug: Log that we're checking a write fault on a non-filtered fd.
+	log.Warningf("DST CheckWriteFault: fd=%d target=%s", fd, target)
+	if fi.ShouldInjectFault(FaultDiskWriteFailure, target) {
+		log.Warningf("DST CheckWriteFault: INJECTING FAULT fd=%d", fd)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultDiskWriteFailure}
+	}
+	return SyscallFaultResult{}
+}
+
+// CheckNetworkSendFault checks if a network send should fail.
+// Returns true if the send should be dropped or fail.
+func CheckNetworkSendFault(target string) SyscallFaultResult {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	if fi.ShouldInjectFault(FaultNetworkDrop, target) {
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkDrop}
+	}
+	return SyscallFaultResult{}
+}
+
+// CheckNetworkRecvFault checks if a network receive should fail.
+// Returns true if the receive should fail.
+func CheckNetworkRecvFault(target string) SyscallFaultResult {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	if fi.ShouldInjectFault(FaultNetworkDrop, target) {
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkDrop}
+	}
+	return SyscallFaultResult{}
+}
+
+// CheckSyscallFault checks if a general syscall should fail with EINTR/EAGAIN.
+// Returns true if the syscall should be interrupted.
+func CheckSyscallFault(target string) SyscallFaultResult {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	if fi.ShouldInjectFault(FaultSyscallEINTR, target) {
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultSyscallEINTR}
+	}
+	if fi.ShouldInjectFault(FaultSyscallEAGAIN, target) {
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultSyscallEAGAIN}
+	}
+	return SyscallFaultResult{}
 }

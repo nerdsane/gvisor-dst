@@ -15,6 +15,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/log",
+        "//pkg/sentry/time",
         "//pkg/sync",
     ],
 )

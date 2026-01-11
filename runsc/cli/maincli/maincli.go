@@ -69,6 +69,7 @@ func forEachCmd(cb func(cmd subcommands.Command, group string), help *cli.Help) 
 
 	const debugGroup = "debug"
 	cb(new(cmd.Debug), debugGroup)
+	cb(new(cmd.DST), debugGroup)
 	cb(new(cmd.Statefile), debugGroup)
 	cb(new(cmd.Symbolize), debugGroup)
 	cb(new(cmd.Usage), debugGroup)

@@ -20,6 +20,7 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
+	dstfault "gvisor.dev/gvisor/pkg/sentry/dst"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/ktime"
 	"gvisor.dev/gvisor/pkg/sentry/socket"
@@ -45,6 +46,14 @@ func Read(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *
 	}
 	defer file.DecRef(t)
 
+	// DST: Check for read fault injection (skip stdin/stdout/stderr and sockets).
+	// Disk faults should only apply to file I/O, not socket I/O.
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckReadFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
+
 	// Check that the size is legitimate.
 	si := int(size)
 	if si < 0 {
@@ -52,14 +61,14 @@ func Read(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *
 	}
 
 	// Get the destination of the read.
-	dst, err := t.SingleIOSequence(addr, si, usermem.IOOpts{
+	ioseq, err := t.SingleIOSequence(addr, si, usermem.IOOpts{
 		AddressSpaceActive: true,
 	})
 	if err != nil {
 		return 0, nil, err
 	}
 
-	n, err := read(t, file, dst, vfs.ReadOptions{})
+	n, err := read(t, file, ioseq, vfs.ReadOptions{})
 	t.IOUsage().AccountReadSyscall(n)
 	return uintptr(n), nil, HandleIOError(t, n != 0, err, linuxerr.ERESTARTSYS, "read", file)
 }
@@ -76,15 +85,23 @@ func Readv(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, 
 	}
 	defer file.DecRef(t)
 
+	// DST: Check for read fault injection (skip stdin/stdout/stderr and sockets).
+	// Disk faults should only apply to file I/O, not socket I/O.
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckReadFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
+
 	// Get the destination of the read.
-	dst, err := t.IovecsIOSequence(addr, iovcnt, usermem.IOOpts{
+	ioseq, err := t.IovecsIOSequence(addr, iovcnt, usermem.IOOpts{
 		AddressSpaceActive: true,
 	})
 	if err != nil {
 		return 0, nil, err
 	}
 
-	n, err := read(t, file, dst, vfs.ReadOptions{})
+	n, err := read(t, file, ioseq, vfs.ReadOptions{})
 	t.IOUsage().AccountReadSyscall(n)
 	return uintptr(n), nil, HandleIOError(t, n != 0, err, linuxerr.ERESTARTSYS, "readv", file)
 }
@@ -299,6 +316,14 @@ func Write(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, 
 	}
 	defer file.DecRef(t)
 
+	// DST: Check for write fault injection (skip stdin/stdout/stderr and sockets).
+	// Disk faults should only apply to file I/O, not socket I/O.
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckWriteFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
+
 	// Check that the size is legitimate.
 	si := int(size)
 	if si < 0 {
@@ -329,6 +354,14 @@ func Writev(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr,
 		return 0, nil, linuxerr.EBADF
 	}
 	defer file.DecRef(t)
+
+	// DST: Check for write fault injection (skip stdin/stdout/stderr and sockets).
+	// Disk faults should only apply to file I/O, not socket I/O.
+	if _, isSocket := file.Impl().(socket.Socket); !isSocket {
+		if result := dstfault.CheckWriteFault(fd, t.Name()); result.ShouldFault {
+			return 0, nil, linuxerr.EIO
+		}
+	}
 
 	// Get the source of the write.
 	src, err := t.IovecsIOSequence(addr, iovcnt, usermem.IOOpts{

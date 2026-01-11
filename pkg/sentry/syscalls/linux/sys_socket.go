@@ -26,6 +26,7 @@ import (
 	"gvisor.dev/gvisor/pkg/marshal"
 	"gvisor.dev/gvisor/pkg/marshal/primitive"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
+	dstfault "gvisor.dev/gvisor/pkg/sentry/dst"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/host"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
@@ -622,6 +623,11 @@ func RecvMsg(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr
 		return 0, nil, linuxerr.EINVAL
 	}
 
+	// DST: Check for network receive fault injection.
+	if result := dstfault.CheckNetworkRecvFault(t.Name()); result.ShouldFault {
+		return 0, nil, linuxerr.ECONNRESET
+	}
+
 	// Get socket from the file descriptor.
 	file := t.GetFile(fd)
 	if file == nil {
@@ -945,6 +951,11 @@ func RecvFrom(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintpt
 	namePtr := args[4].Pointer()
 	nameLenPtr := args[5].Pointer()
 
+	// DST: Check for network receive fault injection.
+	if result := dstfault.CheckNetworkRecvFault(t.Name()); result.ShouldFault {
+		return 0, nil, linuxerr.ECONNRESET
+	}
+
 	n, err := recvFrom(t, fd, bufPtr, bufLen, flags, namePtr, nameLenPtr)
 	return n, nil, err
 }
@@ -966,6 +977,12 @@ func SendMsg(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr
 		return 0, nil, linuxerr.EBADF
 	}
 	defer file.DecRef(t)
+
+	// DST: Check for network send fault injection.
+	if result := dstfault.CheckNetworkSendFault(t.Name()); result.ShouldFault {
+		// Return connection reset to simulate network failure.
+		return 0, nil, linuxerr.ECONNRESET
+	}
 
 	// Extract the socket.
 	s, ok := file.Impl().(socket.Socket)
@@ -1182,6 +1199,13 @@ func SendTo(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr,
 	flags := args[3].Int()
 	namePtr := args[4].Pointer()
 	nameLen := args[5].Uint()
+
+	// DST: Check for network send fault injection.
+	// For network drop, we silently "succeed" but drop the data.
+	if result := dstfault.CheckNetworkSendFault(t.Name()); result.ShouldFault {
+		// Return success but actually drop the packet (simulate packet loss).
+		return uintptr(bufLen), nil, nil
+	}
 
 	n, err := sendTo(t, fd, bufPtr, bufLen, flags, namePtr, nameLen)
 	return n, nil, err

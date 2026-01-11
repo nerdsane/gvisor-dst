@@ -85,6 +85,7 @@ go_library(
         "//pkg/rand",
         "//pkg/safemem",
         "//pkg/sentry/arch",
+        "//pkg/sentry/dst",
         "//pkg/sentry/fsimpl/eventfd",
         "//pkg/sentry/fsimpl/host",
         "//pkg/sentry/fsimpl/iouringfs",

@@ -346,6 +346,9 @@ func (c *Config) ToFlags() []string {
 		if c.DST.FaultDiskWrite > 0 {
 			rv = append(rv, fmt.Sprintf("--dst-fault-disk-write=%f", c.DST.FaultDiskWrite))
 		}
+		if c.DST.FaultDiskRead > 0 {
+			rv = append(rv, fmt.Sprintf("--dst-fault-disk-read=%f", c.DST.FaultDiskRead))
+		}
 		if c.DST.FaultSyscall > 0 {
 			rv = append(rv, fmt.Sprintf("--dst-fault-syscall=%f", c.DST.FaultSyscall))
 		}
