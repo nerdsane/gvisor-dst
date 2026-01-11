@@ -247,6 +247,8 @@ go_library(
         "cgroup_mounts_mutex.go",
         "cgroup_mutex.go",
         "context.go",
+        "dst.go",
+        "dst_scheduler.go",
         "fd_table.go",
         "fd_table_mutex.go",
         "fd_table_refs.go",
@@ -416,6 +418,7 @@ go_test(
     name = "kernel_test",
     size = "small",
     srcs = [
+        "dst_scheduler_test.go",
         "fd_table_test.go",
         "table_test.go",
         "task_test.go",

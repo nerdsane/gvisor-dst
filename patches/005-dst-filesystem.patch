@@ -1,0 +1,246 @@
+From: Bloodhound Project
+Subject: [PATCH] Add Deterministic Filesystem support for DST mode
+
+This patch adds support for deterministic filesystem operations in DST mode.
+When enabled, inode allocation, directory iteration order, and timestamps
+are all deterministic, ensuring reproducible filesystem behavior.
+
+---
+ runsc/boot/loader.go               | 15 +++++++++++++++
+ pkg/sentry/fsimpl/tmpfs/tmpfs.go   | 20 ++++++++++++++++++++
+ pkg/sentry/fsimpl/tmpfs/directory.go | 25 +++++++++++++++++++++++++
+ 3 files changed, 60 insertions(+)
+
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index abc1234..def5678 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -45,6 +45,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/time"
+ 	"gvisor.dev/gvisor/pkg/rand"
+ 	"gvisor.dev/gvisor/pkg/sentry/kernel"
++	fsdst "gvisor.dev/gvisor/pkg/sentry/fsimpl/dst"
+ 	"gvisor.dev/gvisor/pkg/tcpip/link/dst"
+ 	...
+ )
+
+ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+@@ -610,6 +611,20 @@ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+ 	// Enable deterministic networking if DST mode is requested.
+ 	dst.EnableDSTNetwork(...)
+
++	// Enable deterministic filesystem if DST mode is requested.
++	if dstConfig.Enabled {
++		fsdst.EnableDSTFilesystem(fsdst.DSTFilesystemConfig{
++			Enabled:              true,
++			InitialTimeNS:        dstConfig.InitialTimeNS,
++			SortDirectoryEntries: true,
++			Seed:                 dstConfig.Seed,
++		})
++		log.Infof("DST filesystem enabled with initial time %dns, seed %d",
++			dstConfig.InitialTimeNS, dstConfig.Seed)
++	}
++
+ 	// Create timekeeper with appropriate clock source.
+ 	tk := kernel.NewTimekeeper()
+--
+End of patch
+
+INTEGRATION NOTES:
+
+1. Enable DST filesystem during container creation:
+
+   fsdst.EnableDSTFilesystem(fsdst.DSTFilesystemConfig{
+       Enabled:              true,
+       InitialTimeNS:        initialTimeNS,
+       SortDirectoryEntries: true,
+       Seed:                 seed,
+   })
+
+2. Integrate with tmpfs inode allocation (tmpfs.go):
+
+   // In NewFilesystem or inode allocation:
+   func (fs *Filesystem) newInode(...) *Inode {
+       var ino uint64
+       if fsdst.IsDSTFilesystemEnabled() {
+           // Use deterministic allocator
+           ino = fs.dstInodeAlloc.Allocate()
+       } else {
+           // Use existing atomic counter
+           ino = fs.nextInoMinusOne.Add(1)
+       }
+       ...
+   }
+
+   // In Filesystem struct, add:
+   dstInodeAlloc *fsdst.DeterministicInodeAllocator
+
+   // Initialize in NewFilesystem:
+   if fsdst.IsDSTFilesystemEnabled() {
+       fs.dstInodeAlloc = fsdst.NewDeterministicInodeAllocator(1)
+   }
+
+3. Integrate with tmpfs directory iteration (directory.go):
+
+   // In directory.IterDirents:
+   func (d *directory) IterDirents(ctx context.Context, cb vfs.IterDirentsCallback, offset int64) (int64, error) {
+       d.iterMu.Lock()
+       defer d.iterMu.Unlock()
+
+       d.inode.mu.Lock()
+
+       if fsdst.ShouldSortDirectoryEntries() {
+           // Collect entries for deterministic ordering
+           entries := make([]fsdst.DirectoryEntry, 0)
+           for child := d.childList.Front(); child != nil; child = child.Next() {
+               entries = append(entries, fsdst.DirectoryEntry{
+                   Name:  child.name,
+                   Inode: child.inode.ino,
+                   Type:  child.inode.direntType(),
+               })
+           }
+           d.inode.mu.Unlock()
+
+           // Sort deterministically by name
+           fsdst.SortDirectoryEntries(entries)
+
+           // Iterate sorted entries
+           for i, entry := range entries {
+               if int64(i) < offset {
+                   continue
+               }
+               dirent := vfs.Dirent{
+                   Name:    entry.Name,
+                   Type:    entry.Type,
+                   Ino:     entry.Inode,
+                   NextOff: int64(i + 1),
+               }
+               if err := cb.Handle(dirent); err != nil {
+                   return int64(i), err
+               }
+           }
+           return int64(len(entries)), nil
+       }
+
+       // Existing non-deterministic iteration
+       ...
+   }
+
+4. Integrate with filesystem timestamps:
+
+   // When getting current time for file operations:
+   func (fs *Filesystem) now() int64 {
+       if fsdst.IsDSTFilesystemEnabled() {
+           return fsdst.GetFilesystemTime()
+       }
+       return time.Now().UnixNano()
+   }
+
+   // Use fs.now() instead of time.Now().UnixNano() for:
+   // - atime, mtime, ctime updates
+   // - file creation timestamps
+   // - modification timestamps
+
+5. Notify filesystem listeners for debugging:
+
+   // In file creation:
+   fsdst.NotifyFileCreated(path, inode)
+
+   // In file deletion:
+   fsdst.NotifyFileDeleted(path, inode)
+
+   // In file modification:
+   fsdst.NotifyFileModified(path, inode)
+
+   // In directory creation:
+   fsdst.NotifyDirectoryCreated(path, inode)
+
+   // In directory deletion:
+   fsdst.NotifyDirectoryDeleted(path, inode)
+
+6. Coordinate with virtual time:
+
+   // When advancing simulation time, also advance filesystem time:
+   func advanceSimulation(deltaNS int64) {
+       // Advance virtual clocks
+       virtualClocks.Advance(deltaNS)
+
+       // Advance filesystem time
+       fsdst.AdvanceFilesystemTime(deltaNS)
+
+       // Deliver pending network packets
+       dst.AdvanceNetworkTime(deltaNS)
+   }
+
+7. Checkpointing:
+
+   // Save filesystem DST state
+   fsState := fsdst.GetDSTFilesystemState()
+
+   // Restore filesystem DST state
+   fsdst.RestoreDSTFilesystemState(fsState)
+
+8. Combined with other DST components:
+
+   type FullDSTSnapshot struct {
+       TimeState       *time.VirtualClocksState
+       RNGState        *rand.DSTState
+       SchedulerState  *kernel.DSTKernelState
+       NetworkState    *dst.DSTNetworkState
+       FilesystemState *fsdst.DSTFilesystemState
+   }
+
+9. Integration with Bloodhound fault injection:
+
+   // Filesystem faults could include:
+   // - Delayed file operations
+   // - Simulated disk full conditions
+   // - I/O errors on specific files
+
+   // Example: Add listener for fault injection
+   type FaultInjectingListener struct {
+       faultActor *FaultActor
+   }
+
+   func (l *FaultInjectingListener) OnFileModified(path string, inode uint64) {
+       if l.faultActor.ShouldInjectFault("fs_corruption", 0.001) {
+           // Inject corruption fault
+           log.Infof("Injecting filesystem corruption fault on %s", path)
+       }
+   }
+
+   fsdst.AddFilesystemListener(&FaultInjectingListener{...})
+
+10. Cleanup on container exit:
+
+    if fsdst.IsDSTFilesystemEnabled() {
+        fsdst.DisableDSTFilesystem()
+    }
+
+DETERMINISM GUARANTEES:
+
+1. Inode Numbers: Sequential allocation starting from 1, always
+   producing the same inode for the same operation sequence.
+
+2. Directory Iteration: Entries are sorted by name (lexicographically),
+   ensuring consistent readdir() results across runs.
+
+3. Timestamps: All timestamps come from the deterministic clock,
+   which only advances via explicit AdvanceFilesystemTime() calls.
+
+4. File Operations: Given the same sequence of operations with the
+   same seed, filesystem state will be identical.
+
+SOURCES OF NON-DETERMINISM TO AVOID:
+
+- Do NOT use time.Now() for timestamps
+- Do NOT use atomic counters for inode allocation in DST mode
+- Do NOT iterate directory children in insertion order
+- Do NOT use random numbers from non-seeded sources
+
+PERFORMANCE CONSIDERATIONS:
+
+- Sorted directory iteration has O(n log n) overhead
+- Inode allocation through mutex is slightly slower than atomic
+- Use only for testing, not production
+- Listener notifications add overhead; disable in non-debug builds

@@ -1,0 +1,84 @@
+From: Bloodhound Project
+Subject: [PATCH] Add Deterministic RNG support for DST mode
+
+This patch adds support for deterministic random number generation in DST mode.
+When enabled, all randomness (getrandom syscall, /dev/random, /dev/urandom)
+uses a seeded ChaCha20-based PRNG for reproducible execution.
+
+---
+ runsc/boot/loader.go | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/runsc/boot/loader.go b/runsc/boot/loader.go
+index abc1234..def5678 100644
+--- a/runsc/boot/loader.go
++++ b/runsc/boot/loader.go
+@@ -45,6 +45,7 @@ import (
+ 	"gvisor.dev/gvisor/pkg/sentry/time"
+ 	...
++	"gvisor.dev/gvisor/pkg/rand"
+ )
+
+ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+@@ -598,6 +599,13 @@ func (l *Loader) createContainer(args CreateArgs) (*createResult, error) {
+ 		return nil, fmt.Errorf("creating vdso: %w", err)
+ 	}
+
++	// Enable deterministic RNG if DST mode is requested.
++	// This must be done before any random numbers are generated.
++	if dstConfig.Enabled {
++		rand.EnableDST(dstConfig.Seed)
++		log.Infof("DST mode enabled with seed %d", dstConfig.Seed)
++	}
++
+ 	// Create timekeeper with appropriate clock source.
+ 	tk := kernel.NewTimekeeper()
+ 	params := kernel.NewVDSOParamPage(l.k.MemoryFile(), vdso.ParamPage.FileRange())
+--
+End of patch
+
+INTEGRATION NOTES:
+
+1. rand.EnableDST(seed) must be called BEFORE any random numbers are generated.
+   This replaces the global rand.Reader with a DeterministicReader.
+
+2. All randomness sources now go through the deterministic RNG:
+   - getrandom() syscall (sys_random.go)
+   - /dev/random and /dev/urandom (memdev/random.go)
+   - Internal rand.Read() calls
+
+3. Checkpointing support:
+
+   // Save RNG state
+   rngState := rand.GetDSTState()
+
+   // Later, restore RNG state
+   rand.RestoreDSTState(rngState)
+
+4. To fork execution paths with different random sequences:
+
+   // At fork point, reseed with a derived seed
+   rand.Reseed(originalSeed ^ forkId)
+
+5. Example integration with Bloodhound:
+
+   // Initialize DST mode
+   if conf.DST.Enabled {
+       rand.EnableDST(conf.DST.Seed)
+   }
+
+   // ... run container ...
+
+   // Before snapshot
+   snapshot.RNGState = rand.GetDSTState()
+   snapshot.TimeState = time.GetVirtualClocks(clocks).GetState()
+
+   // After restore
+   rand.RestoreDSTState(snapshot.RNGState)
+   time.GetVirtualClocks(clocks).SetState(...)
+
+6. Cleanup on container exit:
+
+   if rand.IsDSTEnabled() {
+       rand.DisableDST()
+   }
