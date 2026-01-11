@@ -1100,21 +1100,118 @@ All 7 phases of DST support for gVisor are now complete:
 
 ## Building
 
-gVisor uses Bazel:
+See [BUILD_DST.md](./BUILD_DST.md) for detailed build instructions.
+
+### Quick Build
 
 ```bash
-# Build runsc with DST support
-bazel build //runsc:runsc
+# Using the build script
+./scripts/build-dst.sh
 
-# Run tests
-bazel test //pkg/sentry/time:time_test
+# Or directly with Bazel
+bazel build //runsc:runsc --config=x86_64
+
+# Run DST tests
+bazel test //pkg/sentry/dst:dst_test
 ```
 
-## Usage with Bloodhound
+### Installation
 
 ```bash
-# Start container in DST mode (once fully integrated)
-runsc --dst --dst-seed=12345 run mycontainer
+# Install the DST-enabled runtime
+./scripts/build-dst.sh --install
+
+# Or manually
+sudo cp bazel-bin/runsc/runsc_/runsc /usr/local/bin/runsc-dst
+```
+
+## Integration with Bloodhound
+
+The gVisor DST fork integrates with Bloodhound via:
+
+1. **GvisorVm** - Rust implementation of the Hypervisor trait
+2. **Control Socket** - Unix socket for DST commands
+3. **JSON Protocol** - Communication between Bloodhound and gVisor
+
+### Bloodhound Configuration
+
+```yaml
+# bloodhound.yaml
+hypervisor:
+  type: gvisor
+  config:
+    runsc_path: /usr/local/bin/runsc-dst
+    state_dir: /var/lib/bloodhound/gvisor
+    dst_enabled: true
+```
+
+### Running with Bloodhound
+
+```bash
+# Test mode (no real gVisor, simulated)
+bloodhound test --compose docker-compose.yml
+
+# Full gVisor mode
+bloodhound explore --gvisor \
+    --compose docker-compose.yml \
+    --runsc /usr/local/bin/runsc-dst \
+    --dst-seed 42
+```
+
+### DST Control Protocol
+
+Communication between Bloodhound and gVisor uses newline-delimited JSON:
+
+```json
+// Command: Step simulation
+{"type":"Step","data":{"steps":100}}
+
+// Response: Success with state
+{"status":"Ok","data":{"step_count":100,"virtual_time_ns":1000000}}
+
+// Command: Create snapshot
+{"type":"Snapshot","data":{"id":"snap-1"}}
+
+// Command: Inject fault
+{"type":"SetFaultProbabilities","data":{"network_drop":0.01}}
+```
+
+See `../src/hypervisor/gvisor/client.rs` for the full protocol implementation.
+
+## Fork Management
+
+This gVisor fork is maintained as part of the Bloodhound project:
+
+- **Base**: gVisor main branch (periodically rebased)
+- **DST Patches**: Applied on top of base
+- **Patches Directory**: `patches/` contains integration guides
+
+### Updating the Fork
+
+```bash
+# Fetch latest gVisor
+git remote add upstream https://github.com/google/gvisor
+git fetch upstream
+
+# Rebase DST changes
+git rebase upstream/master
+
+# Resolve conflicts and rebuild
+./scripts/build-dst.sh --test
+```
+
+## Example: Redis-Rust with gVisor
+
+See `../examples/redis-rust-gvisor/` for a complete example:
+
+```bash
+cd ../examples/redis-rust-gvisor
+
+# Run with gVisor DST
+bloodhound explore --gvisor \
+    --compose docker-compose.yml \
+    --config bloodhound.yaml \
+    --dst-seed 42
 ```
 
 ---
@@ -1126,3 +1223,4 @@ runsc --dst --dst-seed=12345 run mycontainer
 *Phase 5 (Deterministic Filesystem) implemented: January 2026*
 *Phase 6 (Save/Restore for DST) implemented: January 2026*
 *Phase 7 (Bloodhound Integration) implemented: January 2026*
+*Phase 8 (Bloodhound Rust Integration) implemented: January 2026*
