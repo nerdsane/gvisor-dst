@@ -633,6 +633,8 @@ func New(args Args) (*Loader, error) {
 				DiskWriteFailure: args.Conf.DST.FaultDiskWrite,
 				DiskReadFailure:  args.Conf.DST.FaultDiskRead,
 				SyscallFailure:   args.Conf.DST.FaultSyscall,
+				ClockSkew:        args.Conf.DST.FaultClockSkew,
+				ClockJump:        args.Conf.DST.FaultClockJump,
 			},
 		}
 		if dstConfig.MaxSteps == 0 {
@@ -648,6 +650,11 @@ func New(args Args) (*Loader, error) {
 			if l.virtualClocks != nil {
 				coord.SetVirtualClocks(l.virtualClocks)
 			}
+			// Set time fault configuration.
+			coord.SetTimeFaultConfig(dst.TimeFaultConfig{
+				ClockSkewMaxNS: args.Conf.DST.ClockSkewMaxNS,
+				ClockJumpMaxNS: args.Conf.DST.ClockJumpMaxNS,
+			})
 			// Start the simulation so fault injection is active.
 			coord.Start()
 		}

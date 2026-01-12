@@ -352,6 +352,18 @@ func (c *Config) ToFlags() []string {
 		if c.DST.FaultSyscall > 0 {
 			rv = append(rv, fmt.Sprintf("--dst-fault-syscall=%f", c.DST.FaultSyscall))
 		}
+		if c.DST.FaultClockSkew > 0 {
+			rv = append(rv, fmt.Sprintf("--dst-fault-clock-skew=%f", c.DST.FaultClockSkew))
+		}
+		if c.DST.FaultClockJump > 0 {
+			rv = append(rv, fmt.Sprintf("--dst-fault-clock-jump=%f", c.DST.FaultClockJump))
+		}
+		if c.DST.ClockSkewMaxNS != 1000000000 { // Only if different from default
+			rv = append(rv, fmt.Sprintf("--dst-clock-skew-max=%d", c.DST.ClockSkewMaxNS))
+		}
+		if c.DST.ClockJumpMaxNS != 10000000000 { // Only if different from default
+			rv = append(rv, fmt.Sprintf("--dst-clock-jump-max=%d", c.DST.ClockJumpMaxNS))
+		}
 	}
 
 	return rv
