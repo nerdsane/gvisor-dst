@@ -51,6 +51,14 @@ type VirtualClocks struct {
 
 	// listeners are notified when time advances.
 	listeners []TimeListener
+
+	// clockSkewNS is the accumulated clock skew in nanoseconds.
+	// Applied to realtime on each GetTime() call to simulate clock drift.
+	clockSkewNS int64
+
+	// clockSkewRate is the rate of clock skew per nanosecond of time advance.
+	// For example, 0.001 means the clock drifts 1ns per 1000ns of real time.
+	clockSkewRate float64
 }
 
 // TimeListener is notified when virtual time advances.
@@ -127,6 +135,7 @@ func (vc *VirtualClocks) Update() (monotonicParams Parameters, monotonicOk bool,
 }
 
 // GetTime implements Clocks.GetTime.
+// For Realtime, applies accumulated clock skew to simulate clock drift.
 func (vc *VirtualClocks) GetTime(c ClockID) (int64, error) {
 	vc.mu.RLock()
 	defer vc.mu.RUnlock()
@@ -135,7 +144,8 @@ func (vc *VirtualClocks) GetTime(c ClockID) (int64, error) {
 	case Monotonic:
 		return vc.monotonic, nil
 	case Realtime:
-		return vc.realtime, nil
+		// Apply clock skew to realtime
+		return vc.realtime + vc.clockSkewNS, nil
 	default:
 		return 0, linuxerr.EINVAL
 	}
@@ -145,6 +155,7 @@ func (vc *VirtualClocks) GetTime(c ClockID) (int64, error) {
 // in nanoseconds. This is the primary way time progresses in deterministic mode.
 //
 // delta must be non-negative.
+// If a clock skew rate is set, accumulated skew will increase proportionally.
 func (vc *VirtualClocks) Advance(deltaNS int64) {
 	if deltaNS < 0 {
 		panic("VirtualClocks.Advance: negative delta")
@@ -156,6 +167,11 @@ func (vc *VirtualClocks) Advance(deltaNS int64) {
 	vc.mu.Lock()
 	vc.monotonic += deltaNS
 	vc.realtime += deltaNS
+	// Apply clock skew rate if set
+	if vc.clockSkewRate != 0 {
+		skewDelta := int64(float64(deltaNS) * vc.clockSkewRate)
+		vc.clockSkewNS += skewDelta
+	}
 	// Advance virtual TSC proportionally
 	cycles := TSCValue((uint64(deltaNS) * vc.frequency) / 1_000_000_000)
 	vc.baseCycles += cycles
@@ -193,11 +209,33 @@ func (vc *VirtualClocks) SetRealtime(ns int64) {
 	vc.realtime = ns
 }
 
+// VirtualClocksState holds the complete clock state for checkpointing.
+type VirtualClocksState struct {
+	Monotonic     int64
+	Realtime      int64
+	BaseCycles    TSCValue
+	ClockSkewNS   int64
+	ClockSkewRate float64
+}
+
 // GetState returns the current state of both clocks for checkpointing.
 func (vc *VirtualClocks) GetState() (monotonic, realtime int64, baseCycles TSCValue) {
 	vc.mu.RLock()
 	defer vc.mu.RUnlock()
 	return vc.monotonic, vc.realtime, vc.baseCycles
+}
+
+// GetFullState returns the complete clock state including skew for checkpointing.
+func (vc *VirtualClocks) GetFullState() VirtualClocksState {
+	vc.mu.RLock()
+	defer vc.mu.RUnlock()
+	return VirtualClocksState{
+		Monotonic:     vc.monotonic,
+		Realtime:      vc.realtime,
+		BaseCycles:    vc.baseCycles,
+		ClockSkewNS:   vc.clockSkewNS,
+		ClockSkewRate: vc.clockSkewRate,
+	}
 }
 
 // SetState restores the clock state from a checkpoint.
@@ -207,6 +245,17 @@ func (vc *VirtualClocks) SetState(monotonic, realtime int64, baseCycles TSCValue
 	vc.monotonic = monotonic
 	vc.realtime = realtime
 	vc.baseCycles = baseCycles
+}
+
+// SetFullState restores the complete clock state including skew from a checkpoint.
+func (vc *VirtualClocks) SetFullState(state VirtualClocksState) {
+	vc.mu.Lock()
+	defer vc.mu.Unlock()
+	vc.monotonic = state.Monotonic
+	vc.realtime = state.Realtime
+	vc.baseCycles = state.BaseCycles
+	vc.clockSkewNS = state.ClockSkewNS
+	vc.clockSkewRate = state.ClockSkewRate
 }
 
 // AddListener adds a listener that will be notified when time advances.
@@ -226,6 +275,50 @@ func (vc *VirtualClocks) RemoveListener(l TimeListener) {
 			return
 		}
 	}
+}
+
+// InjectClockSkew injects a one-time clock skew.
+// The skewNS is added to the accumulated skew and affects future GetTime(Realtime) calls.
+// Positive values make the clock appear to run fast, negative values make it appear slow.
+// This simulates gradual clock drift over time.
+func (vc *VirtualClocks) InjectClockSkew(skewNS int64) {
+	vc.mu.Lock()
+	defer vc.mu.Unlock()
+	vc.clockSkewNS += skewNS
+}
+
+// InjectClockJump injects a discrete clock jump.
+// The jumpNS is immediately added to realtime, simulating NTP adjustments
+// or other instantaneous clock corrections.
+// Positive values jump forward, negative values jump backward.
+func (vc *VirtualClocks) InjectClockJump(jumpNS int64) {
+	vc.mu.Lock()
+	defer vc.mu.Unlock()
+	vc.realtime += jumpNS
+}
+
+// SetClockSkewRate sets the rate at which clock skew accumulates.
+// The rate is applied during Advance() calls, causing gradual drift.
+// A rate of 0.001 means 1ns of skew per 1000ns of time advance.
+func (vc *VirtualClocks) SetClockSkewRate(rate float64) {
+	vc.mu.Lock()
+	defer vc.mu.Unlock()
+	vc.clockSkewRate = rate
+}
+
+// GetClockSkew returns the current accumulated clock skew in nanoseconds.
+func (vc *VirtualClocks) GetClockSkew() int64 {
+	vc.mu.RLock()
+	defer vc.mu.RUnlock()
+	return vc.clockSkewNS
+}
+
+// ResetClockSkew resets the accumulated clock skew to zero.
+func (vc *VirtualClocks) ResetClockSkew() {
+	vc.mu.Lock()
+	defer vc.mu.Unlock()
+	vc.clockSkewNS = 0
+	vc.clockSkewRate = 0
 }
 
 // Verify that VirtualClocks implements the Clocks interface.

@@ -58,6 +58,22 @@ type DSTConfig struct {
 
 	// FaultSyscall is the probability of syscall failures (0.0-1.0).
 	FaultSyscall float64
+
+	// FaultClockSkew is the probability of injecting clock skew (0.0-1.0).
+	// When triggered, the clock will drift by a random amount.
+	FaultClockSkew float64
+
+	// FaultClockJump is the probability of injecting clock jumps (0.0-1.0).
+	// When triggered, the clock will jump forward or backward by a random amount.
+	FaultClockJump float64
+
+	// ClockSkewMaxNS is the maximum clock skew to inject in nanoseconds.
+	// Defaults to 1 second (1,000,000,000 ns).
+	ClockSkewMaxNS int64
+
+	// ClockJumpMaxNS is the maximum clock jump to inject in nanoseconds.
+	// Defaults to 10 seconds (10,000,000,000 ns).
+	ClockJumpMaxNS int64
 }
 
 // DefaultDSTConfig returns the default DST configuration.
@@ -74,6 +90,10 @@ func DefaultDSTConfig() DSTConfig {
 		FaultDiskWrite:       0.0,
 		FaultDiskRead:        0.0,
 		FaultSyscall:         0.0,
+		FaultClockSkew:       0.0,
+		FaultClockJump:       0.0,
+		ClockSkewMaxNS:       1_000_000_000,  // 1 second
+		ClockJumpMaxNS:       10_000_000_000, // 10 seconds
 	}
 }
 
@@ -90,6 +110,10 @@ func RegisterDSTFlags(flagSet *flag.FlagSet) {
 	flagSet.Float64("dst-fault-disk-write", 0.0, "probability of disk write failures (0.0-1.0).")
 	flagSet.Float64("dst-fault-disk-read", 0.0, "probability of disk read failures (0.0-1.0).")
 	flagSet.Float64("dst-fault-syscall", 0.0, "probability of syscall failures (0.0-1.0).")
+	flagSet.Float64("dst-fault-clock-skew", 0.0, "probability of clock skew injection (0.0-1.0). Simulates clock drift.")
+	flagSet.Float64("dst-fault-clock-jump", 0.0, "probability of clock jump injection (0.0-1.0). Simulates NTP adjustments.")
+	flagSet.Int64("dst-clock-skew-max", 1000000000, "maximum clock skew in nanoseconds. Defaults to 1 second.")
+	flagSet.Int64("dst-clock-jump-max", 10000000000, "maximum clock jump in nanoseconds. Defaults to 10 seconds.")
 }
 
 // DSTConfigFromFlags creates a DSTConfig from command-line flags.
@@ -106,5 +130,9 @@ func DSTConfigFromFlags(flagSet *flag.FlagSet) DSTConfig {
 		FaultDiskWrite:       flag.Get(flagSet.Lookup("dst-fault-disk-write").Value).(float64),
 		FaultDiskRead:        flag.Get(flagSet.Lookup("dst-fault-disk-read").Value).(float64),
 		FaultSyscall:         flag.Get(flagSet.Lookup("dst-fault-syscall").Value).(float64),
+		FaultClockSkew:       flag.Get(flagSet.Lookup("dst-fault-clock-skew").Value).(float64),
+		FaultClockJump:       flag.Get(flagSet.Lookup("dst-fault-clock-jump").Value).(float64),
+		ClockSkewMaxNS:       flag.Get(flagSet.Lookup("dst-clock-skew-max").Value).(int64),
+		ClockJumpMaxNS:       flag.Get(flagSet.Lookup("dst-clock-jump-max").Value).(int64),
 	}
 }

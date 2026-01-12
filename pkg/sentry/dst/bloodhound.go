@@ -38,6 +38,7 @@ const (
 	FaultNetworkBindFailed     FaultType = "network_bind_failed"
 	FaultNetworkListenFailed   FaultType = "network_listen_failed"
 	FaultNetworkAcceptFailed   FaultType = "network_accept_failed"
+	FaultNetworkSocketFailed   FaultType = "network_socket_failed"
 
 	// Disk faults
 	FaultDiskWriteFailure    FaultType = "disk_write_failure"
@@ -110,6 +111,18 @@ type FaultProbabilities struct {
 	ProcessPause         float64
 	MemoryPressure       float64
 	SyscallFailure       float64
+
+	// Time fault probabilities
+	ClockSkew float64 // Probability of clock skew (drift)
+	ClockJump float64 // Probability of clock jump (NTP-like adjustment)
+}
+
+// TimeFaultConfig holds configuration for time fault injection.
+type TimeFaultConfig struct {
+	// ClockSkewMaxNS is the maximum clock skew in nanoseconds.
+	ClockSkewMaxNS int64
+	// ClockJumpMaxNS is the maximum clock jump in nanoseconds.
+	ClockJumpMaxNS int64
 }
 
 // FaultProbabilitiesCalm returns probabilities for calm mode (no faults).
@@ -130,6 +143,8 @@ func FaultProbabilitiesModerate() FaultProbabilities {
 		ProcessPause:     0.0005,
 		MemoryPressure:   0.001,
 		SyscallFailure:   0.001,
+		ClockSkew:        0.001,  // Rare clock drift
+		ClockJump:        0.0005, // Very rare NTP-like jumps
 	}
 }
 
@@ -146,6 +161,8 @@ func FaultProbabilitiesChaos() FaultProbabilities {
 		ProcessPause:     0.005,
 		MemoryPressure:   0.01,
 		SyscallFailure:   0.01,
+		ClockSkew:        0.01,  // Frequent clock drift
+		ClockJump:        0.005, // Occasional NTP-like jumps
 	}
 }
 
@@ -240,15 +257,16 @@ func (f *FaultInjector) SetSeed(seed uint64) {
 func (f *FaultInjector) SetProbabilities(probs FaultProbabilities) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	log.Warningf("DST SetProbabilities: DiskWrite=%.4f DiskRead=%.4f NetworkDrop=%.4f Syscall=%.4f",
-		probs.DiskWriteFailure, probs.DiskReadFailure, probs.NetworkDrop, probs.SyscallFailure)
+	log.Warningf("DST SetProbabilities: DiskWrite=%.4f DiskRead=%.4f NetworkDrop=%.4f Syscall=%.4f ClockSkew=%.4f ClockJump=%.4f",
+		probs.DiskWriteFailure, probs.DiskReadFailure, probs.NetworkDrop, probs.SyscallFailure, probs.ClockSkew, probs.ClockJump)
 	f.probabilities = probs
 	// Enable fault injection if any probability is non-zero.
 	f.enabled = probs.NetworkDrop > 0 || probs.NetworkDelay > 0 ||
 		probs.NetworkPartition > 0 || probs.DiskWriteFailure > 0 ||
 		probs.DiskReadFailure > 0 || probs.DiskCorruption > 0 ||
 		probs.ProcessCrash > 0 || probs.ProcessPause > 0 ||
-		probs.MemoryPressure > 0 || probs.SyscallFailure > 0
+		probs.MemoryPressure > 0 || probs.SyscallFailure > 0 ||
+		probs.ClockSkew > 0 || probs.ClockJump > 0
 }
 
 // GetProbabilities returns the current fault probabilities.
@@ -404,6 +422,10 @@ func (f *FaultInjector) ShouldInjectFault(faultType FaultType, target string) bo
 		prob = f.probabilities.MemoryPressure
 	case FaultSyscallEINTR, FaultSyscallEIO, FaultSyscallENOMEM, FaultSyscallEAGAIN:
 		prob = f.probabilities.SyscallFailure
+	case FaultClockSkew:
+		prob = f.probabilities.ClockSkew
+	case FaultClockJump:
+		prob = f.probabilities.ClockJump
 	default:
 		return false
 	}
@@ -481,6 +503,35 @@ func (f *FaultInjector) ResetStats() {
 		FaultsByType:   make(map[FaultType]uint64),
 		FaultsByTarget: make(map[string]uint64),
 	}
+}
+
+// GenerateRandomValue generates a deterministic random value in range [0, maxValue].
+// Uses the internal RNG, advancing its state.
+func (f *FaultInjector) GenerateRandomValue(maxValue int64) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if maxValue <= 0 {
+		return 0
+	}
+	// Advance xorshift RNG
+	f.rngState ^= f.rngState << 13
+	f.rngState ^= f.rngState >> 7
+	f.rngState ^= f.rngState << 17
+	// Scale to range [0, maxValue]
+	return int64((float64(f.rngState) / float64(^uint64(0))) * float64(maxValue))
+}
+
+// GenerateRandomBool generates a deterministic random boolean.
+// Uses the internal RNG, advancing its state.
+func (f *FaultInjector) GenerateRandomBool() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Advance xorshift RNG
+	f.rngState ^= f.rngState << 13
+	f.rngState ^= f.rngState >> 7
+	f.rngState ^= f.rngState << 17
+	return f.rngState&1 == 0
 }
 
 // FaultInjectorState represents checkpoint state.
@@ -881,6 +932,10 @@ type SimulationCoordinator struct {
 	// Set via SetVirtualClocks when DST mode is enabled.
 	// +checklocks:mu
 	virtualClocks *time.VirtualClocks
+
+	// timeFaultConfig holds configuration for time fault injection.
+	// +checklocks:mu
+	timeFaultConfig TimeFaultConfig
 }
 
 // SimulationListener is notified of simulation events.
@@ -945,6 +1000,59 @@ func (c *SimulationCoordinator) GetVirtualClocks() *time.VirtualClocks {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.virtualClocks
+}
+
+// SetTimeFaultConfig sets the configuration for time fault injection.
+func (c *SimulationCoordinator) SetTimeFaultConfig(cfg TimeFaultConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.timeFaultConfig = cfg
+}
+
+// GetTimeFaultConfig returns the current time fault configuration.
+func (c *SimulationCoordinator) GetTimeFaultConfig() TimeFaultConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.timeFaultConfig
+}
+
+// CheckTimeFault checks if a time fault should be injected and applies it.
+// Returns the type of fault injected (empty string if none).
+// This should be called periodically (e.g., on time-related syscalls).
+func (c *SimulationCoordinator) CheckTimeFault() FaultType {
+	c.mu.Lock()
+	vc := c.virtualClocks
+	fi := c.faultInjector
+	cfg := c.timeFaultConfig
+	c.mu.Unlock()
+
+	if vc == nil {
+		return ""
+	}
+
+	// Check for clock skew fault
+	if fi.ShouldInjectFault(FaultClockSkew, "clock") {
+		// Generate deterministic skew amount using the fault injector's RNG
+		skewNS := fi.GenerateRandomValue(cfg.ClockSkewMaxNS)
+		vc.InjectClockSkew(skewNS)
+		log.Debugf("DST: Injected clock skew of %d ns", skewNS)
+		return FaultClockSkew
+	}
+
+	// Check for clock jump fault
+	if fi.ShouldInjectFault(FaultClockJump, "clock") {
+		// Generate deterministic jump amount (can be positive or negative)
+		jumpNS := fi.GenerateRandomValue(cfg.ClockJumpMaxNS)
+		// Make jumps bidirectional using another RNG step
+		if fi.GenerateRandomBool() {
+			jumpNS = -jumpNS
+		}
+		vc.InjectClockJump(jumpNS)
+		log.Debugf("DST: Injected clock jump of %d ns", jumpNS)
+		return FaultClockJump
+	}
+
+	return ""
 }
 
 // Start starts the simulation.
@@ -1097,14 +1205,38 @@ func (c *SimulationCoordinator) captureSystemState() *SystemState {
 
 // captureDSTState captures DST state for snapshotting.
 func (c *SimulationCoordinator) captureDSTState() *DSTState {
-	return &DSTState{
+	state := &DSTState{
 		Metadata: SnapshotMetadata{
 			Seed:          c.config.Seed,
 			VirtualTimeNS: c.currentTimeNS,
 			StepCount:     c.stepCount,
 			Description:   fmt.Sprintf("step-%d", c.stepCount),
 		},
+		ApplicationState: make(map[string][]byte),
 	}
+
+	// Capture virtual clock state if connected
+	if c.virtualClocks != nil {
+		mono, rt, _ := c.virtualClocks.GetState()
+		skew := c.virtualClocks.GetClockSkew()
+		state.TimeState = &VirtualTimeState{
+			MonotonicNS: mono,
+			RealtimeNS:  rt,
+			Cycles:      0, // Not tracking cycles currently
+		}
+		// Store clock skew in ApplicationState as it's not in VirtualTimeState
+		state.ApplicationState["clock_skew_ns"] = []byte(fmt.Sprintf("%d", skew))
+	}
+
+	// Capture RNG state from fault injector
+	if c.faultInjector != nil {
+		fiState := c.faultInjector.GetState()
+		state.RNGState = &RNGState{
+			Counter: fiState.RNGState, // Use xorshift state as counter
+		}
+	}
+
+	return state
 }
 
 // restoreDSTState restores DST state from a snapshot.
@@ -1112,8 +1244,31 @@ func (c *SimulationCoordinator) restoreDSTState(state *DSTState) {
 	if state == nil {
 		return
 	}
+
+	// Restore basic coordinator state
 	c.currentTimeNS = state.Metadata.VirtualTimeNS
 	c.stepCount = state.Metadata.StepCount
+
+	// Restore virtual clock state if connected
+	if c.virtualClocks != nil && state.TimeState != nil {
+		c.virtualClocks.SetState(state.TimeState.MonotonicNS, state.TimeState.RealtimeNS, 0)
+		// Restore clock skew if stored
+		if skewBytes, ok := state.ApplicationState["clock_skew_ns"]; ok {
+			var skew int64
+			fmt.Sscanf(string(skewBytes), "%d", &skew)
+			c.virtualClocks.ResetClockSkew()
+			c.virtualClocks.InjectClockSkew(skew)
+		}
+	}
+
+	// Restore RNG state to fault injector
+	if c.faultInjector != nil && state.RNGState != nil {
+		fiState := c.faultInjector.GetState()
+		fiState.RNGState = state.RNGState.Counter
+		c.faultInjector.SetState(fiState)
+	}
+
+	log.Debugf("DST: Restored state to step=%d time=%d", c.stepCount, c.currentTimeNS)
 }
 
 // CoordinatorState represents checkpoint state for the coordinator.
@@ -1211,6 +1366,25 @@ func GlobalFaultCheck(faultType FaultType, target string) bool {
 		return false
 	}
 	return coord.GetFaultInjector().ShouldInjectFault(faultType, target)
+}
+
+// GlobalCheckTimeFault is a convenience function to check and inject time faults.
+// Returns the fault type injected (empty string if none).
+func GlobalCheckTimeFault() FaultType {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return ""
+	}
+	return coord.CheckTimeFault()
+}
+
+// GlobalSetTimeFaultConfig sets the time fault configuration globally.
+func GlobalSetTimeFaultConfig(cfg TimeFaultConfig) {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return
+	}
+	coord.SetTimeFaultConfig(cfg)
 }
 
 // GlobalScheduleFault is a convenience function to schedule a fault.
@@ -1393,6 +1567,21 @@ func CheckNetworkAcceptFault(target string) SyscallFaultResult {
 	if fi.ShouldInjectFault(FaultNetworkDrop, target) {
 		log.Warningf("DST: Injecting network drop on accept target=%s", target)
 		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkDrop}
+	}
+	return SyscallFaultResult{}
+}
+
+// CheckNetworkSocketFault checks if a socket() syscall should fail.
+// Returns true if socket creation should fail (e.g., too many open files).
+func CheckNetworkSocketFault(target string) SyscallFaultResult {
+	coord := GetGlobalCoordinator()
+	if coord == nil {
+		return SyscallFaultResult{}
+	}
+	fi := coord.GetFaultInjector()
+	if fi.ShouldInjectFault(FaultNetworkSocketFailed, target) {
+		log.Warningf("DST: Injecting socket fault target=%s", target)
+		return SyscallFaultResult{ShouldFault: true, FaultType: FaultNetworkSocketFailed}
 	}
 	return SyscallFaultResult{}
 }

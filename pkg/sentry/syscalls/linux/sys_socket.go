@@ -175,6 +175,12 @@ func Socket(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr,
 	stype := args[1].Int()
 	protocol := int(args[2].Int())
 
+	// DST: Check for network socket fault injection.
+	if result := dstfault.CheckNetworkSocketFault(t.Name()); result.ShouldFault {
+		// Return EMFILE to simulate too many open files (resource exhaustion).
+		return 0, nil, linuxerr.EMFILE
+	}
+
 	// Check and initialize the flags.
 	if stype & ^(0xf|linux.SOCK_NONBLOCK|linux.SOCK_CLOEXEC) != 0 {
 		return 0, nil, linuxerr.EINVAL
